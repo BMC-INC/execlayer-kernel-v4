@@ -130,9 +130,9 @@ const KernelV4 = () => {
     if (!input.trim() || isGenerating) return;
     const userText = input;
     setInput('');
-    setMessages(prev => [...prev, { role: 'user', text: userText }]);
 
     if (isFirstContact) {
+      setMessages(prev => [...prev, { role: 'user', text: userText }]);
       const name = userText.split(' ').pop();
       setUserName(name);
       setIsFirstContact(false);
@@ -141,28 +141,68 @@ const KernelV4 = () => {
       return;
     }
 
+    if (!userText.trim()) return;
     setIsGenerating(true);
-    setExecutionState('PROVENANCE');
-    addForensic("Sealing Intent Provenance Envelope...", "info");
-    
+    setExecutionState('GOVERNANCE_EVAL');
+
+    setMessages(prev => [
+      ...prev,
+      { role: 'user', text: userText }
+    ]);
+
     try {
-      const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${TEXT_MODEL}:generateContent?key=${apiKey}`, {
+      const response = await fetch('/api/kernel', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          contents: [{ parts: [{ text: userText }] }],
-          systemInstruction: { parts: [{ text: "IDENTITY: ExecLayer Kernel V4.0. Output clinical governance briefing and V3 JSON Blueprint with ALLOW or REFUSE decision." }] }
+          intent: userText,
+          principal: userName || 'Unknown'
         })
       });
-      const data = await response.json();
-      const rawText = data.candidates?.[0]?.content?.parts?.[0]?.text || "Spine Disconnect.";
-      
-      setReceiptChain(prev => [...prev, { stage: 'BLUEPRINT', hash: '0x'+Math.random().toString(16).slice(2,10).toUpperCase() }]);
-      setMessages(prev => [...prev, { role: 'assistant', text: rawText.replace(/\{[\s\S]*\}/, '').trim() }]);
-      addForensic("Intent Validated. Execution Authorized.", "success");
+
+      if (!response.ok) {
+        const err = await response.json().catch(() => ({}));
+        throw new Error(err.error || 'Kernel API error');
+      }
+
+      const { briefingText, blueprint } = await response.json();
+
+      setReceiptChain(prev => [
+        ...prev,
+        {
+          stage: 'BLUEPRINT',
+          hash: '0x' + Math.random().toString(16).slice(2, 10).toUpperCase(),
+          id: blueprint?.blueprint_meta?.blueprint_id || 'UNKNOWN'
+        }
+      ]);
+
+      const rules = blueprint?.governance_dsl?.rules || [];
+      const refused = rules.some(r => r.decision?.type === 'REFUSE');
+
+      if (refused) {
+        addForensic('ENFORCEMENT HALT: Policy Violation Detected.', 'error');
+        setMessages(prev => [
+          ...prev,
+          {
+            role: 'assistant',
+            text: '[ENFORCEMENT HALT] The submitted intent violates current V4 safety constraints. Refusal receipt anchored to DAG.'
+          }
+        ]);
+        setTrustScore(prev => Math.max(0, prev - 15));
+      } else {
+        addForensic('Intent Validated. Execution Authorized.', 'success');
+        setMessages(prev => [
+          ...prev,
+          { role: 'assistant', text: briefingText || 'No briefing returned.' }
+        ]);
+        setTrustScore(prev => Math.min(100, prev + 2));
+      }
     } catch (e) {
-      setMessages(prev => [...prev, { role: 'assistant', text: "Critical Substrate Error: Enforcement Logic Unreachable." }]);
-      addForensic("Spine Sync Failure.", "error");
+      setMessages(prev => [
+        ...prev,
+        { role: 'assistant', text: '[CRITICAL] Infrastructure failure. Kernel API unreachable.' }
+      ]);
+      addForensic('Spine Sync Failure (Kernel API).', 'error');
     } finally {
       setIsGenerating(false);
       setExecutionState('IDLE');
