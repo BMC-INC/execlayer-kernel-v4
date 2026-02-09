@@ -1,6 +1,5 @@
 import { sha256Hex } from './_lib/crypto.js';
-
-const GEMINI_MODEL = 'gemini-2.5-flash-preview-04-17';
+const GEMINI_MODEL = "gemini-1.5-flash";
 
 export default async function handler(req, res) {
   if (req.method !== 'POST') {
