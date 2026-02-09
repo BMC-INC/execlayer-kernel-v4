@@ -291,7 +291,7 @@ const KernelV4 = () => {
           trust_epoch: 1,
           signature_hash: "SIMULATED_ROOT_SIGNATURE",
           expiration_epoch: 9999,
-          session_id: sessionId
+          session_id: sessionId || null
         },
         intent: {
           intent_type: "GENERAL_REQUEST",
