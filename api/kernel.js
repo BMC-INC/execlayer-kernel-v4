@@ -162,21 +162,46 @@ function buildBlueprint(principal, policyCtx, intentHash, gov) {
 }
 
 async function callGemini(apiKey, intent, principal) {
-  const sys = `You are ExecLayer Kernel V4.0 Assistant. Output ONLY valid JSON: {"assistant_response":"...","suggested_next_intents":[]}`;
+  const sys = `You are ExecLayer Kernel V4.0 Assistant. You MUST output ONLY a valid JSON object with no additional text, markdown, or explanation. The JSON object must have exactly this structure:
+{
+  "assistant_response": string,
+  "suggested_next_intents": array
+}
+Do not include any text before or after the JSON object. Do not use markdown code blocks. Output only the raw JSON.`;
   const user = `Principal: ${principal.legal_name} (${principal.organizational_role})\nIntent: ${intent.requested_action}\nTarget: ${intent.target_system}`;
-  const resp = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent?key=${apiKey}`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ contents: [{ parts: [{ text: user }] }], systemInstruction: { parts: [{ text: sys }] } })
-  });
-  if (!resp.ok) return { error: 'GEMINI_API_ERROR', raw_output_hash: sha256Hex(await resp.text()) };
+
+  const makeRequest = async () => {
+    const resp = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent?key=${apiKey}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ contents: [{ parts: [{ text: user }] }], systemInstruction: { parts: [{ text: sys }] } })
+    });
+    return resp;
+  };
+
+  let resp = await makeRequest();
+  
+  if (resp.status >= 500 && resp.status < 600) {
+    resp = await makeRequest();
+  }
+
+  if (!resp.ok) {
+    const rawText = await resp.text();
+    return { error: 'GEMINI_API_ERROR', raw_output_hash: sha256Hex(rawText) };
+  }
+
   const data = await resp.json();
   const raw = data?.candidates?.[0]?.content?.parts?.[0]?.text || '';
   const m = raw.match(/\{[\s\S]*\}/);
-  if (!m) return { error: 'MODEL_OUTPUT_INVALID_JSON', raw_output_hash: sha256Hex(raw) };
+  if (!m) {
+    return { error: 'MODEL_OUTPUT_INVALID_JSON', raw_output_hash: sha256Hex(raw) };
+  }
   try {
     const p = JSON.parse(m[0]);
-    return { assistant_response: p.assistant_response || '', suggested_next_intents: p.suggested_next_intents || [] };
+    if (typeof p.assistant_response !== 'string' || !Array.isArray(p.suggested_next_intents)) {
+      return { error: 'MODEL_OUTPUT_INVALID_JSON', raw_output_hash: sha256Hex(raw) };
+    }
+    return { assistant_response: p.assistant_response, suggested_next_intents: p.suggested_next_intents };
   } catch {
     return { error: 'MODEL_OUTPUT_INVALID_JSON', raw_output_hash: sha256Hex(raw) };
   }

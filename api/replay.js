@@ -137,35 +137,25 @@ export default async function handler(req, res) {
     return;
   }
 
-  const { receipt, principal, session, intent, policy_context, parent_receipt_hash } = req.body || {};
-  if (!receipt || !principal || !session || !intent || !policy_context) {
-    res.status(400).json({ error: 'Missing required fields: receipt, principal, session, intent, policy_context' });
+  const { principal, session, intent, policy_context, parent_receipt_hash, original_receipt_hash } = req.body || {};
+
+  if (!principal || !session || !intent || !policy_context) {
+    res.status(400).json({ error: 'Missing required fields: principal, session, intent, policy_context' });
     return;
   }
 
-  const mismatches = [];
-
   const intentPayload = { principal, session, intent, policy_context, parent_receipt_hash: parent_receipt_hash || null };
   const recomputedIntentHash = sha256Hex(canonicalStringify(intentPayload));
-  if (receipt.intent_hash !== recomputedIntentHash) {
-    mismatches.push({ field: 'intent_hash', expected: receipt.intent_hash, recomputed: recomputedIntentHash });
-  }
 
   const authPayload = {
     principal: { legal_name: principal.legal_name, organizational_role: principal.organizational_role, authority_scope: principal.authority_scope, delegation_chain_reference: principal.delegation_chain_reference },
     session: { token_id: session.token_id, trust_epoch: session.trust_epoch, signature_hash: session.signature_hash, expiration_epoch: session.expiration_epoch }
   };
   const recomputedAuthorityTokenHash = sha256Hex(canonicalStringify(authPayload));
-  if (receipt.authority_token_hash !== recomputedAuthorityTokenHash) {
-    mismatches.push({ field: 'authority_token_hash', expected: receipt.authority_token_hash, recomputed: recomputedAuthorityTokenHash });
-  }
 
   const gov = runRules(principal, session, intent);
   const recomputedBlueprint = buildBlueprint(principal, policy_context, recomputedIntentHash, gov);
   const recomputedBlueprintHash = sha256Hex(canonicalStringify(recomputedBlueprint));
-  if (receipt.blueprint_hash !== recomputedBlueprintHash) {
-    mismatches.push({ field: 'blueprint_hash', expected: receipt.blueprint_hash, recomputed: recomputedBlueprintHash });
-  }
 
   const sessionId = session.session_id || genSessionId(session.token_id, principal.delegation_chain_reference);
   const receiptCore = {
@@ -183,28 +173,14 @@ export default async function handler(req, res) {
   };
 
   const recomputedReceiptHash = sha256Hex(canonicalStringify(receiptCore));
-  const recomputedReceiptSignature = hmacSha256Hex(signingSecret, recomputedReceiptHash);
+  const recomputedSignature = hmacSha256Hex(signingSecret, recomputedReceiptHash);
 
-  if (receipt.status !== receiptCore.status) {
-    mismatches.push({ field: 'status', expected: receipt.status, recomputed: receiptCore.status });
-  }
-  if (receipt.risk_tier !== receiptCore.risk_tier) {
-    mismatches.push({ field: 'risk_tier', expected: receipt.risk_tier, recomputed: receiptCore.risk_tier });
-  }
-
-  const origCodes = JSON.stringify((receipt.reason_codes || []).slice().sort());
-  const recompCodes = JSON.stringify(receiptCore.reason_codes.slice().sort());
-  if (origCodes !== recompCodes) {
-    mismatches.push({ field: 'reason_codes', expected: receipt.reason_codes, recomputed: receiptCore.reason_codes });
-  }
+  const replayMatch = original_receipt_hash ? (original_receipt_hash === recomputedReceiptHash) : null;
 
   res.status(200).json({
-    replay_match: mismatches.length === 0,
-    mismatches,
-    recomputed_intent_hash: recomputedIntentHash,
-    recomputed_authority_token_hash: recomputedAuthorityTokenHash,
-    recomputed_blueprint_hash: recomputedBlueprintHash,
+    replay_match: replayMatch,
     recomputed_receipt_hash: recomputedReceiptHash,
-    recomputed_receipt_signature: recomputedReceiptSignature
+    original_receipt_hash: original_receipt_hash || null,
+    recomputed_signature: recomputedSignature
   });
 }

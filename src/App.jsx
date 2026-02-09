@@ -12,7 +12,9 @@ import {
   Database, 
   Layers, 
   Zap, 
-  ChevronRight, 
+  ChevronRight,
+  ChevronDown,
+  ChevronUp,
   Send, 
   Loader2, 
   Volume2, 
@@ -31,7 +33,8 @@ import {
   Globe,
   ArrowRight,
   Search,
-  Scale
+  Scale,
+  RefreshCw
 } from 'lucide-react';
 
 // --- CONFIGURATION ---
@@ -99,6 +102,127 @@ const BriefingHUD = ({ setView }) => (
 );
 
 // ==========================================
+// COMPONENT: GovernanceInspector (Collapsible Panel)
+// ==========================================
+const GovernanceInspector = ({ data, lastPayload, lastReceiptHash }) => {
+  const [expanded, setExpanded] = useState(false);
+  const [replayResult, setReplayResult] = useState(null);
+  const [replayLoading, setReplayLoading] = useState(false);
+
+  if (!data) return null;
+
+  const handleReplayVerification = async () => {
+    if (!lastPayload || !lastReceiptHash) return;
+    setReplayLoading(true);
+    setReplayResult(null);
+    try {
+      const response = await fetch('/api/replay', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          ...lastPayload,
+          original_receipt_hash: lastReceiptHash
+        })
+      });
+      const result = await response.json();
+      setReplayResult(result);
+    } catch (e) {
+      setReplayResult({ error: 'Replay verification failed' });
+    } finally {
+      setReplayLoading(false);
+    }
+  };
+
+  return (
+    <div className="mt-4 border border-white/10 rounded-xl bg-black/40">
+      <button
+        onClick={() => setExpanded(!expanded)}
+        className="w-full px-4 py-3 flex items-center justify-between text-[10px] font-mono uppercase tracking-widest text-slate-500 hover:text-slate-400"
+      >
+        <span>Governance Inspector</span>
+        {expanded ? <ChevronUp className="w-4 h-4" /> : <ChevronDown className="w-4 h-4" />}
+      </button>
+      {expanded && (
+        <div className="px-4 pb-4 space-y-4 text-[10px] font-mono">
+          <div className="grid grid-cols-2 gap-4">
+            <div>
+              <span className="text-slate-600">session_id:</span>
+              <div className="text-cyan-400 truncate">{data.session_id || 'N/A'}</div>
+            </div>
+            <div>
+              <span className="text-slate-600">receipt_hash:</span>
+              <div className="text-cyan-400 truncate">{data.receipt_hash || 'N/A'}</div>
+            </div>
+            <div>
+              <span className="text-slate-600">risk_tier:</span>
+              <div className="text-cyan-400">{data.risk_tier || 'N/A'}</div>
+            </div>
+            <div>
+              <span className="text-slate-600">status:</span>
+              <div className={data.status === 'ALLOW' ? 'text-green-400' : 'text-red-400'}>{data.status || 'N/A'}</div>
+            </div>
+          </div>
+          {data.reason_codes && data.reason_codes.length > 0 && (
+            <div>
+              <span className="text-slate-600">reason_codes:</span>
+              <div className="text-yellow-400">{data.reason_codes.join(', ')}</div>
+            </div>
+          )}
+          {data.rule_trace && data.rule_trace.length > 0 && (
+            <div>
+              <span className="text-slate-600 block mb-2">rule_trace:</span>
+              <table className="w-full text-[9px] border border-white/10">
+                <thead>
+                  <tr className="bg-white/5">
+                    <th className="px-2 py-1 text-left text-slate-500">rule_id</th>
+                    <th className="px-2 py-1 text-left text-slate-500">type</th>
+                    <th className="px-2 py-1 text-left text-slate-500">decision</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {data.rule_trace.map((rule, idx) => (
+                    <tr key={idx} className="border-t border-white/5">
+                      <td className="px-2 py-1 text-cyan-400">{rule.rule_id}</td>
+                      <td className="px-2 py-1 text-slate-400">{rule.type}</td>
+                      <td className={`px-2 py-1 ${rule.decision === 'ALLOW' ? 'text-green-400' : 'text-red-400'}`}>{rule.decision}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+          <div className="pt-2">
+            <button
+              onClick={handleReplayVerification}
+              disabled={replayLoading || !lastPayload || !lastReceiptHash}
+              className="px-4 py-2 bg-cyan-600 text-black text-[10px] font-bold uppercase rounded flex items-center gap-2 disabled:opacity-50"
+            >
+              {replayLoading ? <Loader2 className="w-3 h-3 animate-spin" /> : <RefreshCw className="w-3 h-3" />}
+              Replay Verification
+            </button>
+            {replayResult && (
+              <div className="mt-2 p-2 border border-white/10 rounded bg-black/60">
+                {replayResult.error ? (
+                  <div className="text-red-400">{replayResult.error}</div>
+                ) : (
+                  <div>
+                    <div className={replayResult.replay_match ? 'text-green-400' : 'text-red-400'}>
+                      replay_match: {replayResult.replay_match ? 'TRUE' : 'FALSE'}
+                    </div>
+                    <div className="text-slate-500 truncate">recomputed: {replayResult.recomputed_receipt_hash}</div>
+                    <div className="text-slate-500 truncate">original: {replayResult.original_receipt_hash}</div>
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+};
+
+// ==========================================
 // COMPONENT: KernelV4 (Functional Engine)
 // ==========================================
 const KernelV4 = () => {
@@ -113,6 +237,8 @@ const KernelV4 = () => {
   const [trustScore, setTrustScore] = useState(100);
   const [sessionId, setSessionId] = useState(null);
   const [lastReceiptHash, setLastReceiptHash] = useState(null);
+  const [lastKernelResponse, setLastKernelResponse] = useState(null);
+  const [lastPayload, setLastPayload] = useState(null);
   const scrollRef = useRef(null);
 
   useEffect(() => {
@@ -181,6 +307,8 @@ const KernelV4 = () => {
         parent_receipt_hash: lastReceiptHash || null
       };
 
+      setLastPayload(requestBody);
+
       const response = await fetch('/api/kernel', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -193,7 +321,9 @@ const KernelV4 = () => {
       }
 
       const data = await response.json();
-      const { briefingText, blueprint } = data;
+      const { blueprint } = data;
+
+      setLastKernelResponse(data);
 
       if (data.session_id) {
         setSessionId(data.session_id);
@@ -206,13 +336,12 @@ const KernelV4 = () => {
         ...prev,
         {
           stage: 'BLUEPRINT',
-          hash: data.receipt_hash || '0x' + Math.random().toString(16).slice(2, 10).toUpperCase(),
+          hash: data.receipt_hash || 'UNKNOWN',
           id: blueprint?.blueprint_meta?.blueprint_id || 'UNKNOWN'
         }
       ]);
 
-      const rules = blueprint?.governance_dsl?.rules || [];
-      const refused = rules.some(r => r.decision?.type === 'REFUSE');
+      const refused = data.status === 'REFUSE';
 
       if (refused) {
         addForensic('ENFORCEMENT HALT: Policy Violation Detected.', 'error');
@@ -220,15 +349,17 @@ const KernelV4 = () => {
           ...prev,
           {
             role: 'assistant',
-            text: '[ENFORCEMENT HALT] The submitted intent violates current V4 safety constraints. Refusal receipt anchored to DAG.'
+            text: '[ENFORCEMENT HALT] The submitted intent violates current V4 safety constraints. Refusal receipt anchored to DAG.',
+            kernelData: data
           }
         ]);
         setTrustScore(prev => Math.max(0, prev - 15));
       } else {
         addForensic('Intent Validated. Execution Authorized.', 'success');
+        const responseText = data.model_result?.assistant_response || 'Intent processed. No model response.';
         setMessages(prev => [
           ...prev,
-          { role: 'assistant', text: briefingText || 'No briefing returned.' }
+          { role: 'assistant', text: responseText, kernelData: data }
         ]);
         setTrustScore(prev => Math.min(100, prev + 2));
       }
@@ -267,12 +398,17 @@ const KernelV4 = () => {
         <div ref={scrollRef} className="flex-1 overflow-y-auto p-6 md:p-12 space-y-8">
           {messages.map((m, i) => (
             <div key={i} className={`flex ${m.role === 'user' ? 'justify-end' : 'justify-start'}`}>
-              <div className={`max-w-[90%] md:max-w-[85%] p-6 md:p-10 rounded-[2rem] ${m.role === 'user' ? 'bg-cyan-600 text-black font-bold shadow-2xl' : 'bg-slate-900/40 border border-white/5 backdrop-blur-xl'}`}>
-                <div className={`flex items-center gap-2 mb-4 text-[9px] font-mono uppercase tracking-widest opacity-40 ${m.role === 'user' ? 'text-black' : 'text-cyan-500'}`}>
-                  {m.role === 'user' ? <User className="w-3 h-3" /> : <ShieldCheck className="w-3 h-3" />}
-                  {m.role === 'user' ? (userName || 'Principal') : 'V4 Kernel'}
+              <div className={`max-w-[90%] md:max-w-[85%] ${m.role === 'user' ? '' : ''}`}>
+                <div className={`p-6 md:p-10 rounded-[2rem] ${m.role === 'user' ? 'bg-cyan-600 text-black font-bold shadow-2xl' : 'bg-slate-900/40 border border-white/5 backdrop-blur-xl'}`}>
+                  <div className={`flex items-center gap-2 mb-4 text-[9px] font-mono uppercase tracking-widest opacity-40 ${m.role === 'user' ? 'text-black' : 'text-cyan-500'}`}>
+                    {m.role === 'user' ? <User className="w-3 h-3" /> : <ShieldCheck className="w-3 h-3" />}
+                    {m.role === 'user' ? (userName || 'Principal') : 'V4 Kernel'}
+                  </div>
+                  <div className="text-base md:text-xl leading-relaxed whitespace-pre-wrap font-medium">{m.text}</div>
                 </div>
-                <div className="text-base md:text-xl leading-relaxed whitespace-pre-wrap font-medium">{m.text}</div>
+                {m.role === 'assistant' && m.kernelData && (
+                  <GovernanceInspector data={m.kernelData} lastPayload={lastPayload} lastReceiptHash={m.kernelData.receipt_hash} />
+                )}
               </div>
             </div>
           ))}
