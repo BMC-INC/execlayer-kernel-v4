@@ -311,6 +311,9 @@ const KernelV4 = () => {
 
       setLastPayload(requestBody);
 
+      console.log("Session:", sessionRef.current);
+      console.log("Parent Hash:", receiptRef.current);
+
       const response = await fetch('/api/kernel', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
