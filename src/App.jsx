@@ -240,6 +240,8 @@ const KernelV4 = () => {
   const [lastKernelResponse, setLastKernelResponse] = useState(null);
   const [lastPayload, setLastPayload] = useState(null);
   const scrollRef = useRef(null);
+  const sessionRef = useRef(null);
+  const receiptRef = useRef(null);
 
   useEffect(() => {
     const initialMsg = "ExecLayer Kernel V4.0 Hardened Spine online. Identity required to anchor session DAG.";
@@ -291,7 +293,7 @@ const KernelV4 = () => {
           trust_epoch: 1,
           signature_hash: "SIMULATED_ROOT_SIGNATURE",
           expiration_epoch: 9999,
-          session_id: sessionId || null
+          session_id: sessionRef.current || null
         },
         intent: {
           intent_type: "GENERAL_REQUEST",
@@ -304,7 +306,7 @@ const KernelV4 = () => {
           jurisdiction: "GLOBAL",
           compliance_class: "INTERNAL_CONTROL"
         },
-        parent_receipt_hash: lastReceiptHash || null
+        parent_receipt_hash: receiptRef.current || null
       };
 
       setLastPayload(requestBody);
@@ -331,9 +333,11 @@ const KernelV4 = () => {
       setLastKernelResponse(data);
 
       if (data.session_id) {
+        sessionRef.current = data.session_id;
         setSessionId(data.session_id);
       }
       if (data.receipt_hash) {
+        receiptRef.current = data.receipt_hash;
         setLastReceiptHash(data.receipt_hash);
       }
 
