@@ -2,7 +2,7 @@ import { canonicalStringify } from './_lib/canonical.js';
 import { sha256Hex, hmacSha256Hex } from './_lib/crypto.js';
 
 const BASE_EPOCH = 1700000000;
-const GEMINI_MODEL = ‘gemini-2.5-flash’;
+const GEMINI_MODEL = 'gemini-2.5-flash';
 
 function validatePrincipal(p) {
   const e = [];
