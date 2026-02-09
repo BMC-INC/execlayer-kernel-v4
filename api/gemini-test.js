@@ -37,7 +37,7 @@ export default async function handler(req, res) {
   }
 
   const truncated = rawText.slice(0, 500);
-  const rawHash = sha256Hex(truncated);
+  const rawHash = await sha256Hex(truncated);
 
   res.status(200).json({
     status: resp.status,

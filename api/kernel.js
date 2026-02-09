@@ -188,28 +188,29 @@ Do not include any text before or after the JSON object. Do not use markdown cod
 
   if (!resp.ok) {
     const rawText = await resp.text();
-    return { error: 'GEMINI_API_ERROR', raw_output_hash: sha256Hex(rawText) };
+    return { error: 'GEMINI_API_ERROR', raw_output_hash: await sha256Hex(rawText) };
   }
 
   const data = await resp.json();
   const raw = data?.candidates?.[0]?.content?.parts?.[0]?.text || '';
   const m = raw.match(/\{[\s\S]*\}/);
   if (!m) {
-    return { error: 'MODEL_OUTPUT_INVALID_JSON', raw_output_hash: sha256Hex(raw) };
+    return { error: 'MODEL_OUTPUT_INVALID_JSON', raw_output_hash: await sha256Hex(raw) };
   }
   try {
     const p = JSON.parse(m[0]);
     if (typeof p.assistant_response !== 'string' || !Array.isArray(p.suggested_next_intents)) {
-      return { error: 'MODEL_OUTPUT_INVALID_JSON', raw_output_hash: sha256Hex(raw) };
+      return { error: 'MODEL_OUTPUT_INVALID_JSON', raw_output_hash: await sha256Hex(raw) };
     }
     return { assistant_response: p.assistant_response, suggested_next_intents: p.suggested_next_intents };
   } catch {
-    return { error: 'MODEL_OUTPUT_INVALID_JSON', raw_output_hash: sha256Hex(raw) };
+    return { error: 'MODEL_OUTPUT_INVALID_JSON', raw_output_hash: await sha256Hex(raw) };
   }
 }
 
-function genSessionId(tokenId, delRef) {
-  return 'GOV-SESS-' + sha256Hex(tokenId + delRef).slice(0, 16).toUpperCase();
+async function genSessionId(tokenId, delRef) {
+  const hash = await sha256Hex(tokenId + delRef);
+  return 'GOV-SESS-' + hash.slice(0, 16).toUpperCase();
 }
 
 export default async function handler(req, res) {
@@ -236,7 +237,7 @@ export default async function handler(req, res) {
 
     const errors = [...validatePrincipal(principal), ...validateSession(session), ...validateIntent(intent), ...validatePolicyContext(policy_context)];
     if (errors.length > 0) {
-      const errHash = sha256Hex(canonicalStringify({ errors }));
+      const errHash = await sha256Hex(canonicalStringify({ errors }));
       const errReceipt = {
         status: 'REFUSE',
         session_id: 'GOV-SESS-VALIDATION-ERROR',
@@ -251,27 +252,27 @@ export default async function handler(req, res) {
         issuer_key_id: issuerKeyId,
         validation_errors: errors
       };
-      const rh = sha256Hex(canonicalStringify(errReceipt));
+      const rh = await sha256Hex(canonicalStringify(errReceipt));
       errReceipt.receipt_hash = rh;
-      errReceipt.receipt_signature = hmacSha256Hex(signingSecret, rh);
+      errReceipt.receipt_signature = await hmacSha256Hex(signingSecret, rh);
       errReceipt.next_parent_receipt_hash = rh;
       res.status(400).json(errReceipt);
       return;
     }
 
     const intentPayload = { principal, session, intent, policy_context, parent_receipt_hash: incomingParentHash };
-    const intentHash = sha256Hex(canonicalStringify(intentPayload));
+    const intentHash = await sha256Hex(canonicalStringify(intentPayload));
     console.log('[KERNEL] Intent hash:', intentHash);
 
     const authPayload = {
       principal: { legal_name: principal.legal_name, organizational_role: principal.organizational_role, authority_scope: principal.authority_scope, delegation_chain_reference: principal.delegation_chain_reference },
       session: { token_id: session.token_id, trust_epoch: session.trust_epoch, signature_hash: session.signature_hash, expiration_epoch: session.expiration_epoch }
     };
-    const authorityTokenHash = sha256Hex(canonicalStringify(authPayload));
+    const authorityTokenHash = await sha256Hex(canonicalStringify(authPayload));
 
     const gov = runRules(principal, session, intent);
     const blueprint = buildBlueprint(principal, policy_context, intentHash, gov);
-    const blueprintHash = sha256Hex(canonicalStringify(blueprint));
+    const blueprintHash = await sha256Hex(canonicalStringify(blueprint));
 
     let modelResult = null;
 
@@ -291,11 +292,11 @@ export default async function handler(req, res) {
         });
 
         const updatedBlueprint = buildBlueprint(principal, policy_context, intentHash, gov);
-        const updatedBlueprintHash = sha256Hex(canonicalStringify(updatedBlueprint));
+        const updatedBlueprintHash = await sha256Hex(canonicalStringify(updatedBlueprint));
 
         const refusalCore = {
           status: 'REFUSE',
-          session_id: incomingSessionId || genSessionId(session.token_id, principal.delegation_chain_reference),
+          session_id: incomingSessionId || await genSessionId(session.token_id, principal.delegation_chain_reference),
           intent_hash: intentHash,
           authority_token_hash: authorityTokenHash,
           blueprint_hash: updatedBlueprintHash,
@@ -307,8 +308,8 @@ export default async function handler(req, res) {
           issuer_key_id: issuerKeyId
         };
 
-        const refusalHash = sha256Hex(canonicalStringify(refusalCore));
-        const refusalSignature = hmacSha256Hex(signingSecret, refusalHash);
+        const refusalHash = await sha256Hex(canonicalStringify(refusalCore));
+        const refusalSignature = await hmacSha256Hex(signingSecret, refusalHash);
 
         const refusalReceipt = {
           ...refusalCore,
@@ -322,7 +323,7 @@ export default async function handler(req, res) {
       }
     }
 
-    const sessionId = incomingSessionId || genSessionId(session.token_id, principal.delegation_chain_reference);
+    const sessionId = incomingSessionId || await genSessionId(session.token_id, principal.delegation_chain_reference);
     const receiptCore = {
       status: blueprint.decision.outcome,
       session_id: sessionId,
@@ -341,8 +342,8 @@ export default async function handler(req, res) {
       receiptCore.model_result = { assistant_response: modelResult.assistant_response, suggested_next_intents: modelResult.suggested_next_intents };
     }
 
-    const receiptHash = sha256Hex(canonicalStringify(receiptCore));
-    const receiptSignature = hmacSha256Hex(signingSecret, receiptHash);
+    const receiptHash = await sha256Hex(canonicalStringify(receiptCore));
+    const receiptSignature = await hmacSha256Hex(signingSecret, receiptHash);
 
     const receipt = { ...receiptCore, receipt_hash: receiptHash, receipt_signature: receiptSignature, next_parent_receipt_hash: receiptHash };
 
