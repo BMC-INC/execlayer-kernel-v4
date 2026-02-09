@@ -212,10 +212,11 @@ function genSessionId(tokenId, delRef) {
 }
 
 export default async function handler(req, res) {
-  if (req.method !== 'POST') {
-    res.status(405).json({ error: 'Method not allowed' });
-    return;
-  }
+  try {
+    if (req.method !== 'POST') {
+      res.status(405).json({ error: 'Method not allowed' });
+      return;
+    }
 
   const signingSecret = process.env.KERNEL_SIGNING_SECRET;
   const issuerKeyId = process.env.KERNEL_ISSUER_KEY_ID || 'KERNEL_V4_ISSUER_01';
@@ -335,5 +336,13 @@ export default async function handler(req, res) {
 
   const receipt = { ...receiptCore, receipt_hash: receiptHash, receipt_signature: receiptSignature, next_parent_receipt_hash: receiptHash };
 
-  res.status(blueprint.decision.outcome === 'ALLOW' ? 200 : 403).json(receipt);
+    res.status(blueprint.decision.outcome === 'ALLOW' ? 200 : 403).json(receipt);
+  } catch (err) {
+    console.error("KERNEL_FATAL_ERROR:", err);
+    return res.status(500).json({
+      status: "ERROR",
+      error: "KERNEL_RUNTIME_EXCEPTION",
+      message: err?.message || "Unknown runtime failure"
+    });
+  }
 }
