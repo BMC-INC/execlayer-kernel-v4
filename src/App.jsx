@@ -111,6 +111,8 @@ const KernelV4 = () => {
   const [receiptChain, setReceiptChain] = useState([]);
   const [forensicTrace, setForensicTrace] = useState([]);
   const [trustScore, setTrustScore] = useState(100);
+  const [sessionId, setSessionId] = useState(null);
+  const [lastReceiptHash, setLastReceiptHash] = useState(null);
   const scrollRef = useRef(null);
 
   useEffect(() => {
@@ -151,13 +153,38 @@ const KernelV4 = () => {
     ]);
 
     try {
+      const requestBody = {
+        principal: {
+          legal_name: "James Benton",
+          organizational_role: "Director",
+          authority_scope: "Kernel Governance Administration",
+          delegation_chain_reference: "ROOT_EXEC_AUTHORITY_V4"
+        },
+        session: {
+          token_id: "ROOT-SESSION-0001",
+          trust_epoch: 1,
+          signature_hash: "SIMULATED_ROOT_SIGNATURE",
+          expiration_epoch: 9999,
+          session_id: sessionId
+        },
+        intent: {
+          intent_type: "GENERAL_REQUEST",
+          target_system: "ExecLayer Kernel V4",
+          requested_action: userText,
+          declared_risk_tier: "LOW"
+        },
+        policy_context: {
+          governing_policy_id: "KERNEL_CONSTITUTION_V4",
+          jurisdiction: "GLOBAL",
+          compliance_class: "INTERNAL_CONTROL"
+        },
+        parent_receipt_hash: lastReceiptHash || null
+      };
+
       const response = await fetch('/api/kernel', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          intent: userText,
-          principal: userName || 'Unknown'
-        })
+        body: JSON.stringify(requestBody)
       });
 
       if (!response.ok) {
@@ -165,13 +192,21 @@ const KernelV4 = () => {
         throw new Error(err.error || 'Kernel API error');
       }
 
-      const { briefingText, blueprint } = await response.json();
+      const data = await response.json();
+      const { briefingText, blueprint } = data;
+
+      if (data.session_id) {
+        setSessionId(data.session_id);
+      }
+      if (data.receipt_hash) {
+        setLastReceiptHash(data.receipt_hash);
+      }
 
       setReceiptChain(prev => [
         ...prev,
         {
           stage: 'BLUEPRINT',
-          hash: '0x' + Math.random().toString(16).slice(2, 10).toUpperCase(),
+          hash: data.receipt_hash || '0x' + Math.random().toString(16).slice(2, 10).toUpperCase(),
           id: blueprint?.blueprint_meta?.blueprint_id || 'UNKNOWN'
         }
       ]);
