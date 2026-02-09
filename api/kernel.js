@@ -218,124 +218,134 @@ export default async function handler(req, res) {
       return;
     }
 
-  const signingSecret = process.env.KERNEL_SIGNING_SECRET;
-  const issuerKeyId = process.env.KERNEL_ISSUER_KEY_ID || 'KERNEL_V4_ISSUER_01';
-  if (!signingSecret) {
-    res.status(500).json({ error: 'KERNEL_SIGNING_SECRET not configured' });
-    return;
-  }
-
-  const apiKey = process.env.GEMINI_API_KEY;
-  const { principal, session, intent, policy_context, parent_receipt_hash } = req.body || {};
-
-  const errors = [...validatePrincipal(principal), ...validateSession(session), ...validateIntent(intent), ...validatePolicyContext(policy_context)];
-  if (errors.length > 0) {
-    const errHash = sha256Hex(canonicalStringify({ errors }));
-    const errReceipt = {
-      status: 'REFUSE',
-      session_id: 'GOV-SESS-VALIDATION-ERROR',
-      intent_hash: errHash,
-      authority_token_hash: null,
-      blueprint_hash: null,
-      parent_receipt_hash: parent_receipt_hash || null,
-      risk_tier: 'CRITICAL',
-      reason_codes: ['VALIDATION_FAILED'],
-      rule_trace: [{ rule_id: 'INPUT_VALIDATION', type: 'SCHEMA_CHECK', input_facts: { errors }, decision: 'REFUSE' }],
-      blueprint: null,
-      issuer_key_id: issuerKeyId,
-      validation_errors: errors
-    };
-    const rh = sha256Hex(canonicalStringify(errReceipt));
-    errReceipt.receipt_hash = rh;
-    errReceipt.receipt_signature = hmacSha256Hex(signingSecret, rh);
-    errReceipt.next_parent_receipt_hash = rh;
-    res.status(400).json(errReceipt);
-    return;
-  }
-
-  const intentPayload = { principal, session, intent, policy_context, parent_receipt_hash: parent_receipt_hash || null };
-  const intentHash = sha256Hex(canonicalStringify(intentPayload));
-
-  const authPayload = {
-    principal: { legal_name: principal.legal_name, organizational_role: principal.organizational_role, authority_scope: principal.authority_scope, delegation_chain_reference: principal.delegation_chain_reference },
-    session: { token_id: session.token_id, trust_epoch: session.trust_epoch, signature_hash: session.signature_hash, expiration_epoch: session.expiration_epoch }
-  };
-  const authorityTokenHash = sha256Hex(canonicalStringify(authPayload));
-
-  const gov = runRules(principal, session, intent);
-  const blueprint = buildBlueprint(principal, policy_context, intentHash, gov);
-  const blueprintHash = sha256Hex(canonicalStringify(blueprint));
-
-  let modelResult = null;
-
-  if (blueprint.decision.outcome === 'ALLOW' && apiKey) {
-    modelResult = await callGemini(apiKey, intent, principal);
-
-    if (modelResult?.error) {
-      gov.outcome = 'REFUSE';
-      gov.codes.push('MODEL_OUTPUT_INVALID_JSON');
-      gov.rules.push({
-        rule_id: 'MODEL_OUTPUT_VALIDATION',
-        type: 'MODEL_OUTPUT_CHECK',
-        input_facts: { error: modelResult.error },
-        decision: 'REFUSE'
-      });
-
-      const updatedBlueprint = buildBlueprint(principal, policy_context, intentHash, gov);
-      const updatedBlueprintHash = sha256Hex(canonicalStringify(updatedBlueprint));
-
-      const refusalCore = {
-        status: 'REFUSE',
-        session_id: session.session_id || genSessionId(session.token_id, principal.delegation_chain_reference),
-        intent_hash: intentHash,
-        authority_token_hash: authorityTokenHash,
-        blueprint_hash: updatedBlueprintHash,
-        parent_receipt_hash: parent_receipt_hash || null,
-        risk_tier: updatedBlueprint.blueprint_meta.risk_tier,
-        reason_codes: updatedBlueprint.decision.reason_codes,
-        rule_trace: updatedBlueprint.rule_trace,
-        blueprint: updatedBlueprint,
-        issuer_key_id: issuerKeyId
-      };
-
-      const refusalHash = sha256Hex(canonicalStringify(refusalCore));
-      const refusalSignature = hmacSha256Hex(signingSecret, refusalHash);
-
-      const refusalReceipt = {
-        ...refusalCore,
-        receipt_hash: refusalHash,
-        receipt_signature: refusalSignature,
-        next_parent_receipt_hash: refusalHash
-      };
-
-      return res.status(403).json(refusalReceipt);
+    const signingSecret = process.env.KERNEL_SIGNING_SECRET;
+    const issuerKeyId = process.env.KERNEL_ISSUER_KEY_ID || 'KERNEL_V4_ISSUER_01';
+    if (!signingSecret) {
+      res.status(500).json({ error: 'KERNEL_SIGNING_SECRET not configured' });
+      return;
     }
-  }
 
-  const sessionId = session.session_id || genSessionId(session.token_id, principal.delegation_chain_reference);
-  const receiptCore = {
-    status: blueprint.decision.outcome,
-    session_id: sessionId,
-    intent_hash: intentHash,
-    authority_token_hash: authorityTokenHash,
-    blueprint_hash: blueprintHash,
-    parent_receipt_hash: parent_receipt_hash || null,
-    risk_tier: blueprint.blueprint_meta.risk_tier,
-    reason_codes: blueprint.decision.reason_codes,
-    rule_trace: blueprint.rule_trace,
-    blueprint,
-    issuer_key_id: issuerKeyId
-  };
+    const apiKey = process.env.GEMINI_API_KEY;
+    const { principal, session, intent, policy_context, parent_receipt_hash } = req.body || {};
 
-  if (blueprint.decision.outcome === 'ALLOW' && modelResult && !modelResult.error) {
-    receiptCore.model_result = { assistant_response: modelResult.assistant_response, suggested_next_intents: modelResult.suggested_next_intents };
-  }
+    // Defensive logging
+    const incomingSessionId = session?.session_id || null;
+    const incomingParentHash = parent_receipt_hash || null;
+    console.log('[KERNEL] Request start', { session_id: incomingSessionId, parent_receipt_hash: incomingParentHash });
 
-  const receiptHash = sha256Hex(canonicalStringify(receiptCore));
-  const receiptSignature = hmacSha256Hex(signingSecret, receiptHash);
+    const errors = [...validatePrincipal(principal), ...validateSession(session), ...validateIntent(intent), ...validatePolicyContext(policy_context)];
+    if (errors.length > 0) {
+      const errHash = sha256Hex(canonicalStringify({ errors }));
+      const errReceipt = {
+        status: 'REFUSE',
+        session_id: 'GOV-SESS-VALIDATION-ERROR',
+        intent_hash: errHash,
+        authority_token_hash: null,
+        blueprint_hash: null,
+        parent_receipt_hash: incomingParentHash,
+        risk_tier: 'CRITICAL',
+        reason_codes: ['VALIDATION_FAILED'],
+        rule_trace: [{ rule_id: 'INPUT_VALIDATION', type: 'SCHEMA_CHECK', input_facts: { errors }, decision: 'REFUSE' }],
+        blueprint: null,
+        issuer_key_id: issuerKeyId,
+        validation_errors: errors
+      };
+      const rh = sha256Hex(canonicalStringify(errReceipt));
+      errReceipt.receipt_hash = rh;
+      errReceipt.receipt_signature = hmacSha256Hex(signingSecret, rh);
+      errReceipt.next_parent_receipt_hash = rh;
+      res.status(400).json(errReceipt);
+      return;
+    }
 
-  const receipt = { ...receiptCore, receipt_hash: receiptHash, receipt_signature: receiptSignature, next_parent_receipt_hash: receiptHash };
+    const intentPayload = { principal, session, intent, policy_context, parent_receipt_hash: incomingParentHash };
+    const intentHash = sha256Hex(canonicalStringify(intentPayload));
+    console.log('[KERNEL] Intent hash:', intentHash);
 
+    const authPayload = {
+      principal: { legal_name: principal.legal_name, organizational_role: principal.organizational_role, authority_scope: principal.authority_scope, delegation_chain_reference: principal.delegation_chain_reference },
+      session: { token_id: session.token_id, trust_epoch: session.trust_epoch, signature_hash: session.signature_hash, expiration_epoch: session.expiration_epoch }
+    };
+    const authorityTokenHash = sha256Hex(canonicalStringify(authPayload));
+
+    const gov = runRules(principal, session, intent);
+    const blueprint = buildBlueprint(principal, policy_context, intentHash, gov);
+    const blueprintHash = sha256Hex(canonicalStringify(blueprint));
+
+    let modelResult = null;
+
+    if (blueprint.decision.outcome === 'ALLOW' && apiKey) {
+      console.log('[KERNEL] Calling Gemini...');
+      modelResult = await callGemini(apiKey, intent, principal);
+      console.log('[KERNEL] Gemini complete', { hasError: !!modelResult?.error });
+
+      if (modelResult?.error) {
+        gov.outcome = 'REFUSE';
+        gov.codes.push('MODEL_OUTPUT_INVALID_JSON');
+        gov.rules.push({
+          rule_id: 'MODEL_OUTPUT_VALIDATION',
+          type: 'MODEL_OUTPUT_CHECK',
+          input_facts: { error: modelResult.error },
+          decision: 'REFUSE'
+        });
+
+        const updatedBlueprint = buildBlueprint(principal, policy_context, intentHash, gov);
+        const updatedBlueprintHash = sha256Hex(canonicalStringify(updatedBlueprint));
+
+        const refusalCore = {
+          status: 'REFUSE',
+          session_id: incomingSessionId || genSessionId(session.token_id, principal.delegation_chain_reference),
+          intent_hash: intentHash,
+          authority_token_hash: authorityTokenHash,
+          blueprint_hash: updatedBlueprintHash,
+          parent_receipt_hash: incomingParentHash,
+          risk_tier: updatedBlueprint.blueprint_meta.risk_tier,
+          reason_codes: updatedBlueprint.decision.reason_codes,
+          rule_trace: updatedBlueprint.rule_trace,
+          blueprint: updatedBlueprint,
+          issuer_key_id: issuerKeyId
+        };
+
+        const refusalHash = sha256Hex(canonicalStringify(refusalCore));
+        const refusalSignature = hmacSha256Hex(signingSecret, refusalHash);
+
+        const refusalReceipt = {
+          ...refusalCore,
+          receipt_hash: refusalHash,
+          receipt_signature: refusalSignature,
+          next_parent_receipt_hash: refusalHash
+        };
+
+        console.log('[KERNEL] Returning REFUSE (model error)', { receipt_hash: refusalHash });
+        return res.status(403).json(refusalReceipt);
+      }
+    }
+
+    const sessionId = incomingSessionId || genSessionId(session.token_id, principal.delegation_chain_reference);
+    const receiptCore = {
+      status: blueprint.decision.outcome,
+      session_id: sessionId,
+      intent_hash: intentHash,
+      authority_token_hash: authorityTokenHash,
+      blueprint_hash: blueprintHash,
+      parent_receipt_hash: incomingParentHash,
+      risk_tier: blueprint.blueprint_meta.risk_tier,
+      reason_codes: blueprint.decision.reason_codes,
+      rule_trace: blueprint.rule_trace,
+      blueprint,
+      issuer_key_id: issuerKeyId
+    };
+
+    if (blueprint.decision.outcome === 'ALLOW' && modelResult && !modelResult.error) {
+      receiptCore.model_result = { assistant_response: modelResult.assistant_response, suggested_next_intents: modelResult.suggested_next_intents };
+    }
+
+    const receiptHash = sha256Hex(canonicalStringify(receiptCore));
+    const receiptSignature = hmacSha256Hex(signingSecret, receiptHash);
+
+    const receipt = { ...receiptCore, receipt_hash: receiptHash, receipt_signature: receiptSignature, next_parent_receipt_hash: receiptHash };
+
+    console.log('[KERNEL] Returning', { status: blueprint.decision.outcome, receipt_hash: receiptHash, session_id: sessionId });
     res.status(blueprint.decision.outcome === 'ALLOW' ? 200 : 403).json(receipt);
   } catch (err) {
     console.error("KERNEL_FATAL_ERROR:", err);
