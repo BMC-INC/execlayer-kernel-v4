@@ -315,12 +315,17 @@ const KernelV4 = () => {
         body: JSON.stringify(requestBody)
       });
 
-      if (!response.ok) {
-        const err = await response.json().catch(() => ({}));
-        throw new Error(err.error || 'Kernel API error');
+      let data;
+      try {
+        data = await response.json();
+      } catch {
+        throw new Error('Invalid JSON response from Kernel');
       }
 
-      const data = await response.json();
+      if (response.status >= 500) {
+        throw new Error('Infrastructure failure');
+      }
+
       const { blueprint } = data;
 
       setLastKernelResponse(data);
