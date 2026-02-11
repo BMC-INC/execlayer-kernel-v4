@@ -52,7 +52,7 @@ export default async function handler(req, res) {
 
       // Verify HMAC signature if signing secret is available
       if (signingSecret && r.receipt_signature) {
-        const expectedSig = await hmacSha256Hex(signingSecret, r.receipt_hash + r.parent_receipt_hash + r.intent_hash);
+        const expectedSig = await hmacSha256Hex(signingSecret, '1.0' + r.receipt_hash + r.parent_receipt_hash + r.intent_hash);
         const sigValid = expectedSig === r.receipt_signature;
         signatureResults.push({
           receipt_hash: r.receipt_hash.slice(0, 12) + '...',

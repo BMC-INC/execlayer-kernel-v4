@@ -3,6 +3,7 @@ import { sha256Hex, hmacSha256Hex } from './_lib/crypto.js';
 import { JournalAdapter } from './_lib/journal_adapter.js';
 import { UnifiedSerializer } from './_lib/serializer.js';
 
+const BASELINE_VERSION = '1.0';
 const BASE_EPOCH = 1700000000;
 const GEMINI_MODEL = 'gemini-2.5-flash';
 
@@ -372,6 +373,16 @@ export default async function handler(req, res) {
       return;
     }
 
+    // Baseline version enforcement for EXECUTE intents
+    if (intent && intent.intent_type === 'EXECUTE') {
+      if (!intent.baseline_version) {
+        return res.status(400).json({ status: 'REFUSE', reason_codes: ['BASELINE_VERSION_REQUIRED'], rule_trace: [{ rule_id: 'RULE_BASELINE_VERSION_ENFORCEMENT', result: 'REFUSE', reason_code: 'BASELINE_VERSION_REQUIRED', facts: { expected: BASELINE_VERSION, provided: null } }], baseline_version: BASELINE_VERSION });
+      }
+      if (intent.baseline_version !== BASELINE_VERSION) {
+        return res.status(400).json({ status: 'REFUSE', reason_codes: ['BASELINE_VERSION_MISMATCH'], rule_trace: [{ rule_id: 'RULE_BASELINE_VERSION_ENFORCEMENT', result: 'REFUSE', reason_code: 'BASELINE_VERSION_MISMATCH', facts: { expected: BASELINE_VERSION, provided: intent.baseline_version } }], baseline_version: BASELINE_VERSION });
+      }
+    }
+
     // Authoritative parent hash from durable store
     const authoritativeParentHash = await JournalAdapter.getHead();
 
@@ -397,7 +408,7 @@ export default async function handler(req, res) {
       const fullReceipt = {
         ...errReceipt,
         receipt_hash: rh,
-        receipt_signature: await hmacSha256Hex(signingSecret, rh),
+        receipt_signature: await hmacSha256Hex(signingSecret, BASELINE_VERSION + rh + errReceipt.parent_receipt_hash + errReceipt.intent_hash),
         next_parent_receipt_hash: rh
       };
 
@@ -425,6 +436,9 @@ export default async function handler(req, res) {
     const enforcementTrace = [];
     let enforcementRefused = false;
     const enforcementCodes = [];
+
+    // Gate -1: Baseline version enforcement (must be first rule in trace)
+    enforcementTrace.push({ rule_id: 'RULE_BASELINE_VERSION_ENFORCEMENT', result: 'ALLOW', reason_code: '', facts: { baseline_version: BASELINE_VERSION, provided: intent.baseline_version || BASELINE_VERSION } });
 
     // Gate 0: Scope profile must be mapped
     if (!scopeProfile) {
@@ -465,7 +479,9 @@ export default async function handler(req, res) {
     if (enforcementRefused) {
       const sessionId = session.session_id || await genSessionId(session.token_id, principal.delegation_chain_reference);
       const refusalCore = {
+        baseline_version: BASELINE_VERSION,
         status: 'REFUSE',
+        execution_result_code: 'EXECUTION_DENIED',
         session_id: sessionId,
         intent_hash: intentHash,
         authority_token_hash: authorityTokenHash,
@@ -481,7 +497,7 @@ export default async function handler(req, res) {
       const refusalReceipt = {
         ...refusalCore,
         receipt_hash: rh,
-        receipt_signature: await hmacSha256Hex(signingSecret, rh + refusalCore.parent_receipt_hash + refusalCore.intent_hash),
+        receipt_signature: await hmacSha256Hex(signingSecret, BASELINE_VERSION + rh + refusalCore.parent_receipt_hash + refusalCore.intent_hash),
         next_parent_receipt_hash: rh
       };
       await JournalAdapter.writeReceipt(refusalReceipt);
@@ -522,7 +538,9 @@ export default async function handler(req, res) {
         const updatedBlueprintHash = await sha256Hex(canonicalStringify(updatedBlueprint));
 
         const refusalCore = {
+          baseline_version: BASELINE_VERSION,
           status: 'REFUSE',
+          execution_result_code: 'EXECUTION_DENIED',
           session_id: session.session_id || await genSessionId(session.token_id, principal.delegation_chain_reference),
           intent_hash: intentHash,
           authority_token_hash: authorityTokenHash,
@@ -536,7 +554,7 @@ export default async function handler(req, res) {
         };
 
         const refusalHash = await sha256Hex(canonicalStringify(refusalCore));
-        const refusalSignature = await hmacSha256Hex(signingSecret, refusalHash + refusalCore.parent_receipt_hash + refusalCore.intent_hash);
+        const refusalSignature = await hmacSha256Hex(signingSecret, BASELINE_VERSION + refusalHash + refusalCore.parent_receipt_hash + refusalCore.intent_hash);
 
         const refusalReceipt = {
           ...refusalCore,
@@ -554,6 +572,7 @@ export default async function handler(req, res) {
 
     // Authority envelope — model_result is EXCLUDED from receipt hash
     const receiptCore = {
+      baseline_version: BASELINE_VERSION,
       status: blueprint.decision.outcome,
       execution_result_code: blueprint.decision.outcome === 'ALLOW' ? 'EXECUTION_COMMITTED' : 'EXECUTION_DENIED',
       session_id: sessionId,
@@ -569,7 +588,7 @@ export default async function handler(req, res) {
     };
 
     const receiptHash = await sha256Hex(canonicalStringify(receiptCore));
-    const receiptSignature = await hmacSha256Hex(signingSecret, receiptHash + authoritativeParentHash + intentHash);
+    const receiptSignature = await hmacSha256Hex(signingSecret, BASELINE_VERSION + receiptHash + authoritativeParentHash + intentHash);
 
     const receipt = { ...receiptCore, receipt_hash: receiptHash, receipt_signature: receiptSignature, next_parent_receipt_hash: receiptHash };
 

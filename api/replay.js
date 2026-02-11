@@ -2,11 +2,13 @@ import { canonicalStringify } from './_lib/canonical.js';
 import { sha256Hex, hmacSha256Hex } from './_lib/crypto.js';
 import { UnifiedSerializer } from './_lib/serializer.js';
 
+const BASELINE_VERSION = '1.0';
 const BASE_EPOCH = 1700000000;
 
+// Tier ordering: TIER_1 = lowest, TIER_4 = highest
 function getPrivilegeTier(ref) {
-  if (ref === 'ROOT_EXEC_AUTHORITY_V4') return 'TIER_0';
-  if (ref === 'FINANCE_ANALYST_V1') return 'TIER_4';
+  if (ref === 'ROOT_EXEC_AUTHORITY_V4') return 'TIER_4';
+  if (ref === 'FINANCE_ANALYST_V1') return 'TIER_2';
   return 'TIER_3';
 }
 
@@ -147,6 +149,16 @@ export default async function handler(req, res) {
        return;
     }
 
+    // Baseline version enforcement for replay
+    if (intent.baseline_version && intent.baseline_version !== BASELINE_VERSION) {
+      return res.status(400).json({
+        status: 'REFUSE',
+        reason_codes: ['BASELINE_VERSION_MISMATCH'],
+        rule_trace: [{ rule_id: 'RULE_BASELINE_VERSION_ENFORCEMENT', result: 'REFUSE', reason_code: 'BASELINE_VERSION_MISMATCH', facts: { expected: BASELINE_VERSION, provided: intent.baseline_version } }],
+        baseline_version: BASELINE_VERSION
+      });
+    }
+
     const intentPayload = { principal, session, intent, policy_context, parent_receipt_hash: parent_receipt_hash || null };
     const recomputedIntentHash = await sha256Hex(canonicalStringify(intentPayload));
 
@@ -162,6 +174,7 @@ export default async function handler(req, res) {
 
     const sessionId = session.session_id || await genSessionId(session.token_id, principal.delegation_chain_reference);
     const receiptCore = {
+      baseline_version: BASELINE_VERSION,
       status: recomputedBlueprint.decision.outcome,
       session_id: sessionId,
       intent_hash: recomputedIntentHash,
@@ -176,11 +189,12 @@ export default async function handler(req, res) {
     };
 
     const recomputedReceiptHash = await sha256Hex(canonicalStringify(receiptCore));
-    const recomputedSignature = await hmacSha256Hex(signingSecret, recomputedReceiptHash);
+    const recomputedSignature = await hmacSha256Hex(signingSecret, BASELINE_VERSION + recomputedReceiptHash);
 
     const replayMatch = original_receipt_hash ? (original_receipt_hash === recomputedReceiptHash) : null;
 
     const response = {
+      baseline_version: BASELINE_VERSION,
       final_decision: recomputedBlueprint.decision.outcome,
       intent_hash: recomputedIntentHash,
       blueprint_hash: recomputedBlueprintHash,
