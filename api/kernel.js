@@ -1,5 +1,7 @@
 import { canonicalStringify } from './_lib/canonical.js';
 import { sha256Hex, hmacSha256Hex } from './_lib/crypto.js';
+import { JournalAdapter } from './_lib/journal_adapter.js';
+import { UnifiedSerializer } from './_lib/serializer.js';
 
 const BASE_EPOCH = 1700000000;
 const GEMINI_MODEL = 'gemini-2.5-flash';
@@ -18,16 +20,13 @@ function validateSession(s) {
   const e = [];
   if (!s) return ['session is required'];
   if (!s.token_id || typeof s.token_id !== 'string') e.push('session.token_id required');
-  if (typeof s.trust_epoch !== 'number') e.push('session.trust_epoch must be number');
-  if (!s.signature_hash || typeof s.signature_hash !== 'string') e.push('session.signature_hash required');
-  if (typeof s.expiration_epoch !== 'number') e.push('session.expiration_epoch must be number');
   return e;
 }
 
 function validateIntent(i) {
   const e = [];
   if (!i) return ['intent is required'];
-  const valid = ['FINANCIAL_TRANSFER', 'GENERAL_REQUEST', 'SYSTEM_COMMAND', 'DATA_QUERY', 'AUDIT_REQUEST'];
+  const valid = ['FINANCIAL_TRANSFER', 'GENERAL_REQUEST', 'SYSTEM_COMMAND', 'DATA_QUERY', 'AUDIT_REQUEST', 'EXECUTE'];
   if (!i.intent_type || !valid.includes(i.intent_type)) e.push('intent.intent_type invalid');
   if (!i.target_system || typeof i.target_system !== 'string') e.push('intent.target_system required');
   if (!i.requested_action || typeof i.requested_action !== 'string') e.push('intent.requested_action required');
@@ -78,13 +77,17 @@ function parseAmount(params) {
   return null;
 }
 
+function normalizeTargetSystem(ts) {
+  return typeof ts === 'string' ? ts.trim().toUpperCase() : ts;
+}
+
 function runRules(principal, session, intent) {
   const rules = [];
   const codes = [];
   let tier = intent.declared_risk_tier || 'LOW';
   let outcome = 'ALLOW';
 
-  if (session.expiration_epoch < session.trust_epoch) {
+  if (session.expiration_epoch && session.trust_epoch && session.expiration_epoch < session.trust_epoch) {
     rules.push({ rule_id: 'TOKEN_EXPIRY', type: 'SESSION_VALIDATION', input_facts: { expiration_epoch: session.expiration_epoch, trust_epoch: session.trust_epoch }, decision: 'REFUSE' });
     codes.push('TOKEN_EXPIRED_EPOCH');
     outcome = 'REFUSE';
@@ -180,7 +183,7 @@ Do not include any text before or after the JSON object. Do not use markdown cod
   };
 
   let resp = await makeRequest();
-  
+
   if (resp.status >= 500 && resp.status < 600) {
     resp = await makeRequest();
   }
@@ -215,24 +218,28 @@ async function genSessionId(tokenId, delRef) {
 export default async function handler(req, res) {
   try {
     if (req.method !== 'POST') {
-      res.status(405).json({ error: 'Method not allowed' });
+      res.status(405).json(UnifiedSerializer.serializeError('METHOD_NOT_ALLOWED', 'Only POST allowed'));
       return;
     }
 
     const signingSecret = process.env.KERNEL_SIGNING_SECRET;
     const issuerKeyId = process.env.KERNEL_ISSUER_KEY_ID || 'KERNEL_V4_ISSUER_01';
     if (!signingSecret) {
-      res.status(500).json({ error: 'KERNEL_SIGNING_SECRET not configured' });
+      res.status(500).json(UnifiedSerializer.serializeError('CONFIG_ERROR', 'Missing signing secret'));
       return;
     }
 
     const apiKey = process.env.GEMINI_API_KEY;
-    const { principal, session, intent, policy_context, parent_receipt_hash } = req.body || {};
+    const { principal, session, intent, policy_context, tenant_id } = req.body || {};
 
-    // Defensive logging
-    const incomingSessionId = session?.session_id || null;
-    const incomingParentHash = parent_receipt_hash || null;
-    console.log('[KERNEL] Request start', { session_id: incomingSessionId, parent_receipt_hash: incomingParentHash });
+    // Mandatory Tenant ID Check for EXECUTE
+    if (intent && intent.intent_type === 'EXECUTE' && !tenant_id) {
+      res.status(400).json(UnifiedSerializer.serializeError('MISSING_TENANT_ID', 'Tenant ID is mandatory for EXECUTE intents'));
+      return;
+    }
+
+    // Authoritative parent hash from durable store
+    const authoritativeParentHash = await JournalAdapter.getHead();
 
     const errors = [...validatePrincipal(principal), ...validateSession(session), ...validateIntent(intent), ...validatePolicyContext(policy_context)];
     if (errors.length > 0) {
@@ -243,7 +250,7 @@ export default async function handler(req, res) {
         intent_hash: errHash,
         authority_token_hash: null,
         blueprint_hash: null,
-        parent_receipt_hash: incomingParentHash,
+        parent_receipt_hash: authoritativeParentHash,
         risk_tier: 'CRITICAL',
         reason_codes: ['VALIDATION_FAILED'],
         rule_trace: [{ rule_id: 'INPUT_VALIDATION', type: 'SCHEMA_CHECK', input_facts: { errors }, decision: 'REFUSE' }],
@@ -251,17 +258,26 @@ export default async function handler(req, res) {
         issuer_key_id: issuerKeyId,
         validation_errors: errors
       };
+
       const rh = await sha256Hex(canonicalStringify(errReceipt));
-      errReceipt.receipt_hash = rh;
-      errReceipt.receipt_signature = await hmacSha256Hex(signingSecret, rh);
-      errReceipt.next_parent_receipt_hash = rh;
-      res.status(400).json(errReceipt);
+      const fullReceipt = {
+        ...errReceipt,
+        receipt_hash: rh,
+        receipt_signature: await hmacSha256Hex(signingSecret, rh),
+        next_parent_receipt_hash: rh
+      };
+
+      await JournalAdapter.writeReceipt(fullReceipt);
+      res.status(400).json(fullReceipt);
       return;
     }
 
-    const intentPayload = { principal, session, intent, policy_context, parent_receipt_hash: incomingParentHash };
+    // Normalize target_system before canonicalization
+    const normalizedIntent = { ...intent, target_system: normalizeTargetSystem(intent.target_system) };
+
+    // Include tenant_id in canonicalized intent payload
+    const intentPayload = { principal, session, intent: normalizedIntent, policy_context, parent_receipt_hash: authoritativeParentHash, tenant_id: tenant_id || null };
     const intentHash = await sha256Hex(canonicalStringify(intentPayload));
-    console.log('[KERNEL] Intent hash:', intentHash);
 
     const authPayload = {
       principal: { legal_name: principal.legal_name, organizational_role: principal.organizational_role, authority_scope: principal.authority_scope, delegation_chain_reference: principal.delegation_chain_reference },
@@ -269,16 +285,14 @@ export default async function handler(req, res) {
     };
     const authorityTokenHash = await sha256Hex(canonicalStringify(authPayload));
 
-    const gov = runRules(principal, session, intent);
+    const gov = runRules(principal, session, normalizedIntent);
     const blueprint = buildBlueprint(principal, policy_context, intentHash, gov);
     const blueprintHash = await sha256Hex(canonicalStringify(blueprint));
 
     let modelResult = null;
 
     if (blueprint.decision.outcome === 'ALLOW' && apiKey) {
-      console.log('[KERNEL] Calling Gemini...');
-      modelResult = await callGemini(apiKey, intent, principal);
-      console.log('[KERNEL] Gemini complete', { hasError: !!modelResult?.error });
+      modelResult = await callGemini(apiKey, normalizedIntent, principal);
 
       if (modelResult?.error) {
         gov.outcome = 'REFUSE';
@@ -295,11 +309,11 @@ export default async function handler(req, res) {
 
         const refusalCore = {
           status: 'REFUSE',
-          session_id: incomingSessionId || await genSessionId(session.token_id, principal.delegation_chain_reference),
+          session_id: session.session_id || await genSessionId(session.token_id, principal.delegation_chain_reference),
           intent_hash: intentHash,
           authority_token_hash: authorityTokenHash,
           blueprint_hash: updatedBlueprintHash,
-          parent_receipt_hash: incomingParentHash,
+          parent_receipt_hash: authoritativeParentHash,
           risk_tier: updatedBlueprint.blueprint_meta.risk_tier,
           reason_codes: updatedBlueprint.decision.reason_codes,
           rule_trace: updatedBlueprint.rule_trace,
@@ -317,19 +331,19 @@ export default async function handler(req, res) {
           next_parent_receipt_hash: refusalHash
         };
 
-        console.log('[KERNEL] Returning REFUSE (model error)', { receipt_hash: refusalHash });
+        await JournalAdapter.writeReceipt(refusalReceipt);
         return res.status(403).json(refusalReceipt);
       }
     }
 
-    const sessionId = incomingSessionId || await genSessionId(session.token_id, principal.delegation_chain_reference);
+    const sessionId = session.session_id || await genSessionId(session.token_id, principal.delegation_chain_reference);
     const receiptCore = {
       status: blueprint.decision.outcome,
       session_id: sessionId,
       intent_hash: intentHash,
       authority_token_hash: authorityTokenHash,
       blueprint_hash: blueprintHash,
-      parent_receipt_hash: incomingParentHash,
+      parent_receipt_hash: authoritativeParentHash,
       risk_tier: blueprint.blueprint_meta.risk_tier,
       reason_codes: blueprint.decision.reason_codes,
       rule_trace: blueprint.rule_trace,
@@ -346,14 +360,15 @@ export default async function handler(req, res) {
 
     const receipt = { ...receiptCore, receipt_hash: receiptHash, receipt_signature: receiptSignature, next_parent_receipt_hash: receiptHash };
 
-    console.log('[KERNEL] Returning', { status: blueprint.decision.outcome, receipt_hash: receiptHash, session_id: sessionId });
+    await JournalAdapter.writeReceipt(receipt);
     res.status(blueprint.decision.outcome === 'ALLOW' ? 200 : 403).json(receipt);
+
   } catch (err) {
-    console.error("KERNEL_FATAL_ERROR:", err);
-    return res.status(500).json({
-      status: "ERROR",
-      error: "KERNEL_RUNTIME_EXCEPTION",
-      message: err?.message || "Unknown runtime failure"
-    });
+    try {
+      const errorReceipt = UnifiedSerializer.serializeError('KERNEL_RUNTIME_EXCEPTION', err?.message || 'Unknown runtime failure');
+      res.status(500).json(errorReceipt);
+    } catch (_) {
+      res.status(500).json(UnifiedSerializer.serializeError('SERIALIZATION_VIOLATION', 'Fatal serialization failure'));
+    }
   }
 }

@@ -1,5 +1,6 @@
 import { canonicalStringify } from './_lib/canonical.js';
 import { sha256Hex, hmacSha256Hex } from './_lib/crypto.js';
+import { UnifiedSerializer } from './_lib/serializer.js';
 
 const BASE_EPOCH = 1700000000;
 
@@ -43,7 +44,7 @@ function runRules(principal, session, intent) {
   let tier = intent.declared_risk_tier || 'LOW';
   let outcome = 'ALLOW';
 
-  if (session.expiration_epoch < session.trust_epoch) {
+  if (session.expiration_epoch && session.trust_epoch && session.expiration_epoch < session.trust_epoch) {
     rules.push({ rule_id: 'TOKEN_EXPIRY', type: 'SESSION_VALIDATION', input_facts: { expiration_epoch: session.expiration_epoch, trust_epoch: session.trust_epoch }, decision: 'REFUSE' });
     codes.push('TOKEN_EXPIRED_EPOCH');
     outcome = 'REFUSE';
@@ -120,67 +121,79 @@ function buildBlueprint(principal, policyCtx, intentHash, gov) {
   };
 }
 
-function genSessionId(tokenId, delRef) {
-  return 'GOV-SESS-' + sha256Hex(tokenId + delRef).slice(0, 16).toUpperCase();
+async function genSessionId(tokenId, delRef) {
+  const hash = await sha256Hex(tokenId + delRef);
+  return 'GOV-SESS-' + hash.slice(0, 16).toUpperCase();
 }
 
 export default async function handler(req, res) {
-  if (req.method !== 'POST') {
-    res.status(405).json({ error: 'Method not allowed' });
-    return;
+  try {
+    if (req.method !== 'POST') {
+      res.status(405).json(UnifiedSerializer.serializeError('METHOD_NOT_ALLOWED', 'Only POST allowed'));
+      return;
+    }
+
+    const signingSecret = process.env.KERNEL_SIGNING_SECRET;
+    const issuerKeyId = process.env.KERNEL_ISSUER_KEY_ID || 'KERNEL_V4_ISSUER_01';
+    if (!signingSecret) {
+      res.status(500).json(UnifiedSerializer.serializeError('CONFIG_ERROR', 'Missing signing secret'));
+      return;
+    }
+
+    const { principal, session, intent, policy_context, parent_receipt_hash, original_receipt_hash } = req.body || {};
+
+    if (!principal || !session || !intent || !policy_context) {
+       res.status(400).json(UnifiedSerializer.serializeError('BAD_REQUEST', 'Missing required fields'));
+       return;
+    }
+
+    const intentPayload = { principal, session, intent, policy_context, parent_receipt_hash: parent_receipt_hash || null };
+    const recomputedIntentHash = await sha256Hex(canonicalStringify(intentPayload));
+
+    const authPayload = {
+      principal: { legal_name: principal.legal_name, organizational_role: principal.organizational_role, authority_scope: principal.authority_scope, delegation_chain_reference: principal.delegation_chain_reference },
+      session: { token_id: session.token_id, trust_epoch: session.trust_epoch, signature_hash: session.signature_hash, expiration_epoch: session.expiration_epoch }
+    };
+    const recomputedAuthorityTokenHash = await sha256Hex(canonicalStringify(authPayload));
+
+    const gov = runRules(principal, session, intent);
+    const recomputedBlueprint = buildBlueprint(principal, policy_context, recomputedIntentHash, gov);
+    const recomputedBlueprintHash = await sha256Hex(canonicalStringify(recomputedBlueprint));
+
+    const sessionId = session.session_id || await genSessionId(session.token_id, principal.delegation_chain_reference);
+    const receiptCore = {
+      status: recomputedBlueprint.decision.outcome,
+      session_id: sessionId,
+      intent_hash: recomputedIntentHash,
+      authority_token_hash: recomputedAuthorityTokenHash,
+      blueprint_hash: recomputedBlueprintHash,
+      parent_receipt_hash: parent_receipt_hash || null,
+      risk_tier: recomputedBlueprint.blueprint_meta.risk_tier,
+      reason_codes: recomputedBlueprint.decision.reason_codes,
+      rule_trace: recomputedBlueprint.rule_trace,
+      blueprint: recomputedBlueprint,
+      issuer_key_id: issuerKeyId
+    };
+
+    const recomputedReceiptHash = await sha256Hex(canonicalStringify(receiptCore));
+    const recomputedSignature = await hmacSha256Hex(signingSecret, recomputedReceiptHash);
+
+    const replayMatch = original_receipt_hash ? (original_receipt_hash === recomputedReceiptHash) : null;
+
+    const response = {
+      final_decision: recomputedBlueprint.decision.outcome,
+      intent_hash: recomputedIntentHash,
+      blueprint_hash: recomputedBlueprintHash,
+      rule_trace: recomputedBlueprint.rule_trace,
+      replay_verification: {
+         match: replayMatch,
+         recomputed_hash: recomputedReceiptHash,
+         original_hash: original_receipt_hash || null
+      }
+    };
+
+    res.status(200).json(response);
+  } catch (err) {
+     res.status(500).json(UnifiedSerializer.serializeError('REPLAY_RUNTIME_EXCEPTION', err?.message || 'Unknown error'));
   }
-
-  const signingSecret = process.env.KERNEL_SIGNING_SECRET;
-  const issuerKeyId = process.env.KERNEL_ISSUER_KEY_ID || 'KERNEL_V4_ISSUER_01';
-  if (!signingSecret) {
-    res.status(500).json({ error: 'KERNEL_SIGNING_SECRET not configured' });
-    return;
-  }
-
-  const { principal, session, intent, policy_context, parent_receipt_hash, original_receipt_hash } = req.body || {};
-
-  if (!principal || !session || !intent || !policy_context) {
-    res.status(400).json({ error: 'Missing required fields: principal, session, intent, policy_context' });
-    return;
-  }
-
-  const intentPayload = { principal, session, intent, policy_context, parent_receipt_hash: parent_receipt_hash || null };
-  const recomputedIntentHash = sha256Hex(canonicalStringify(intentPayload));
-
-  const authPayload = {
-    principal: { legal_name: principal.legal_name, organizational_role: principal.organizational_role, authority_scope: principal.authority_scope, delegation_chain_reference: principal.delegation_chain_reference },
-    session: { token_id: session.token_id, trust_epoch: session.trust_epoch, signature_hash: session.signature_hash, expiration_epoch: session.expiration_epoch }
-  };
-  const recomputedAuthorityTokenHash = sha256Hex(canonicalStringify(authPayload));
-
-  const gov = runRules(principal, session, intent);
-  const recomputedBlueprint = buildBlueprint(principal, policy_context, recomputedIntentHash, gov);
-  const recomputedBlueprintHash = sha256Hex(canonicalStringify(recomputedBlueprint));
-
-  const sessionId = session.session_id || genSessionId(session.token_id, principal.delegation_chain_reference);
-  const receiptCore = {
-    status: recomputedBlueprint.decision.outcome,
-    session_id: sessionId,
-    intent_hash: recomputedIntentHash,
-    authority_token_hash: recomputedAuthorityTokenHash,
-    blueprint_hash: recomputedBlueprintHash,
-    parent_receipt_hash: parent_receipt_hash || null,
-    risk_tier: recomputedBlueprint.blueprint_meta.risk_tier,
-    reason_codes: recomputedBlueprint.decision.reason_codes,
-    rule_trace: recomputedBlueprint.rule_trace,
-    blueprint: recomputedBlueprint,
-    issuer_key_id: issuerKeyId
-  };
-
-  const recomputedReceiptHash = sha256Hex(canonicalStringify(receiptCore));
-  const recomputedSignature = hmacSha256Hex(signingSecret, recomputedReceiptHash);
-
-  const replayMatch = original_receipt_hash ? (original_receipt_hash === recomputedReceiptHash) : null;
-
-  res.status(200).json({
-    replay_match: replayMatch,
-    recomputed_receipt_hash: recomputedReceiptHash,
-    original_receipt_hash: original_receipt_hash || null,
-    recomputed_signature: recomputedSignature
-  });
 }

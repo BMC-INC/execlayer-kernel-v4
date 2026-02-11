@@ -13,7 +13,8 @@
     "react-dom": "^18.2.0",
     "lucide-react": "^0.322.0",
     "wouter": "^2.11.0",
-    "framer-motion": "^11.0.3"
+    "framer-motion": "^11.0.3",
+    "@vercel/postgres": "^0.10.0"
   },
   "devDependencies": {
     "@vitejs/plugin-react": "^4.2.1",
