@@ -481,7 +481,7 @@ export default async function handler(req, res) {
       const refusalReceipt = {
         ...refusalCore,
         receipt_hash: rh,
-        receipt_signature: await hmacSha256Hex(signingSecret, rh),
+        receipt_signature: await hmacSha256Hex(signingSecret, rh + refusalCore.parent_receipt_hash + refusalCore.intent_hash),
         next_parent_receipt_hash: rh
       };
       await JournalAdapter.writeReceipt(refusalReceipt);
@@ -536,7 +536,7 @@ export default async function handler(req, res) {
         };
 
         const refusalHash = await sha256Hex(canonicalStringify(refusalCore));
-        const refusalSignature = await hmacSha256Hex(signingSecret, refusalHash);
+        const refusalSignature = await hmacSha256Hex(signingSecret, refusalHash + refusalCore.parent_receipt_hash + refusalCore.intent_hash);
 
         const refusalReceipt = {
           ...refusalCore,
@@ -551,8 +551,11 @@ export default async function handler(req, res) {
     }
 
     const sessionId = session.session_id || await genSessionId(session.token_id, principal.delegation_chain_reference);
+
+    // Authority envelope — model_result is EXCLUDED from receipt hash
     const receiptCore = {
       status: blueprint.decision.outcome,
+      execution_result_code: blueprint.decision.outcome === 'ALLOW' ? 'EXECUTION_COMMITTED' : 'EXECUTION_DENIED',
       session_id: sessionId,
       intent_hash: intentHash,
       authority_token_hash: authorityTokenHash,
@@ -565,17 +568,20 @@ export default async function handler(req, res) {
       issuer_key_id: issuerKeyId
     };
 
-    if (blueprint.decision.outcome === 'ALLOW' && modelResult && !modelResult.error) {
-      receiptCore.model_result = { assistant_response: modelResult.assistant_response, suggested_next_intents: modelResult.suggested_next_intents };
-    }
-
     const receiptHash = await sha256Hex(canonicalStringify(receiptCore));
-    const receiptSignature = await hmacSha256Hex(signingSecret, receiptHash);
+    const receiptSignature = await hmacSha256Hex(signingSecret, receiptHash + authoritativeParentHash + intentHash);
 
     const receipt = { ...receiptCore, receipt_hash: receiptHash, receipt_signature: receiptSignature, next_parent_receipt_hash: receiptHash };
 
     await JournalAdapter.writeReceipt(receipt);
-    res.status(blueprint.decision.outcome === 'ALLOW' ? 200 : 403).json(receipt);
+
+    // Model narrative returned OUTSIDE authority boundary — not part of receipt hash
+    const response = { ...receipt };
+    if (blueprint.decision.outcome === 'ALLOW' && modelResult && !modelResult.error) {
+      response.model_narrative = { assistant_response: modelResult.assistant_response, suggested_next_intents: modelResult.suggested_next_intents };
+    }
+
+    res.status(blueprint.decision.outcome === 'ALLOW' ? 200 : 403).json(response);
 
   } catch (err) {
     const errMsg = err?.message || 'Unknown runtime failure';

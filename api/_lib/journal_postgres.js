@@ -27,6 +27,7 @@ export const PostgresJournal = {
     const reasonCodes = (receipt.reason_codes || []).join(',');
     const canonicalIntent = JSON.stringify(receipt);
     const ruleTrace = JSON.stringify(receipt.rule_trace || []);
+    const receiptSignature = receipt.receipt_signature || '';
 
     // SERIALIZABLE transaction: lock head, validate parent, insert, update head
     const client = await sql.connect();
@@ -67,11 +68,11 @@ export const PostgresJournal = {
         }
       }
 
-      // 4. Insert receipt
+      // 4. Insert receipt with signature
       await client.query(
-        `INSERT INTO receipts (receipt_hash, parent_receipt_hash, intent_hash, status, reason_code, canonical_intent, rule_trace)
-         VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7::jsonb)`,
-        [receiptHash, parentHash, intentHash, status, reasonCodes, canonicalIntent, ruleTrace]
+        `INSERT INTO receipts (receipt_hash, parent_receipt_hash, intent_hash, status, reason_code, canonical_intent, rule_trace, receipt_signature)
+         VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7::jsonb, $8)`,
+        [receiptHash, parentHash, intentHash, status, reasonCodes, canonicalIntent, ruleTrace, receiptSignature]
       );
 
       // 5. Update DAG head
