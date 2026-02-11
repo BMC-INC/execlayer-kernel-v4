@@ -21,6 +21,13 @@ const SCOPE_PROFILES = {
     max_risk: 'LOW',
     override_eligible: false
   },
+  QueueFlow_Ops: {
+    allowed_tenants: ['queueflow-prod'],
+    allowed_systems: ['QUEUEFLOW'],
+    max_risk: 'MODERATE',
+    override_eligible: true,
+    required_override_tier: 'TIER_3'
+  },
   Restricted: {
     allowed_tenants: [],
     allowed_systems: [],
