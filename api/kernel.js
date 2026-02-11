@@ -6,6 +6,110 @@ import { UnifiedSerializer } from './_lib/serializer.js';
 const BASE_EPOCH = 1700000000;
 const GEMINI_MODEL = 'gemini-2.5-flash';
 
+// Scope mapping table — maps authority_scope string to structured profile
+const SCOPE_PROFILES = {
+  Full_Access: {
+    allowed_tenants: ['*'],
+    allowed_systems: ['*'],
+    max_risk: 'HIGH',
+    override_eligible: true,
+    required_override_tier: 'TIER_3'
+  },
+  Read_Only: {
+    allowed_tenants: ['*'],
+    allowed_systems: ['*'],
+    max_risk: 'LOW',
+    override_eligible: false
+  },
+  Restricted: {
+    allowed_tenants: [],
+    allowed_systems: [],
+    max_risk: 'LOW',
+    override_eligible: false
+  }
+};
+
+const RISK_LEVELS = { LOW: 1, MEDIUM: 2, MODERATE: 2, HIGH: 3, CRITICAL: 4 };
+
+function resolveScopeProfile(authorityScope) {
+  return SCOPE_PROFILES[authorityScope] || null;
+}
+
+function evaluateTenantScope(scopeProfile, tenantId, authorityScope) {
+  const entry = {
+    rule_id: 'RULE_TENANT_SCOPE_ENFORCEMENT',
+    result: 'ALLOW',
+    reason_code: '',
+    facts: { tenant_id: tenantId, allowed_tenants: scopeProfile.allowed_tenants, authority_scope: authorityScope }
+  };
+  if (scopeProfile.allowed_tenants.includes('*')) return entry;
+  if (!scopeProfile.allowed_tenants.includes(tenantId)) {
+    entry.result = 'REFUSE';
+    entry.reason_code = 'TENANT_MISMATCH';
+  }
+  return entry;
+}
+
+function evaluateSystemScope(scopeProfile, targetSystem, authorityScope) {
+  const entry = {
+    rule_id: 'RULE_SYSTEM_SCOPE_ENFORCEMENT',
+    result: 'ALLOW',
+    reason_code: '',
+    facts: { target_system: targetSystem, allowed_systems: scopeProfile.allowed_systems, authority_scope: authorityScope }
+  };
+  if (scopeProfile.allowed_systems.includes('*')) return entry;
+  if (!scopeProfile.allowed_systems.includes(targetSystem)) {
+    entry.result = 'REFUSE';
+    entry.reason_code = 'SYSTEM_SCOPE_MISMATCH';
+  }
+  return entry;
+}
+
+function evaluateRiskCeiling(scopeProfile, declaredRisk, privilegeTier, authorityScope) {
+  const maxLevel = RISK_LEVELS[scopeProfile.max_risk] || 1;
+  const declaredLevel = RISK_LEVELS[declaredRisk] || 1;
+
+  const entry = {
+    rule_id: 'RULE_RISK_CEILING_ENFORCEMENT',
+    result: 'ALLOW',
+    reason_code: '',
+    facts: {
+      declared_risk_tier: declaredRisk,
+      max_risk: scopeProfile.max_risk,
+      authority_scope: authorityScope,
+      privilege_tier: privilegeTier
+    }
+  };
+
+  if (declaredLevel <= maxLevel) return entry;
+
+  // Risk exceeds ceiling — check for privilege override
+  if (scopeProfile.override_eligible) {
+    const tierNum = parseInt(privilegeTier.replace('TIER_', ''), 10);
+    const requiredNum = parseInt((scopeProfile.required_override_tier || 'TIER_0').replace('TIER_', ''), 10);
+    if (tierNum <= requiredNum) {
+      // Privilege override granted — record it explicitly
+      return {
+        rule_id: 'RULE_RISK_OVERRIDE_BY_PRIVILEGE',
+        result: 'ALLOW',
+        reason_code: '',
+        facts: {
+          declared_risk_tier: declaredRisk,
+          max_risk: scopeProfile.max_risk,
+          privilege_tier: privilegeTier,
+          required_override_tier: scopeProfile.required_override_tier,
+          override_granted: true
+        }
+      };
+    }
+  }
+
+  // No override possible
+  entry.result = 'REFUSE';
+  entry.reason_code = 'RISK_TIER_EXCEEDS_SCOPE';
+  return entry;
+}
+
 function validatePrincipal(p) {
   const e = [];
   if (!p) return ['principal is required'];
@@ -87,36 +191,36 @@ function runRules(principal, session, intent) {
   let tier = intent.declared_risk_tier || 'LOW';
   let outcome = 'ALLOW';
 
+  // Session expiry check
   if (session.expiration_epoch && session.trust_epoch && session.expiration_epoch < session.trust_epoch) {
-    rules.push({ rule_id: 'TOKEN_EXPIRY', type: 'SESSION_VALIDATION', input_facts: { expiration_epoch: session.expiration_epoch, trust_epoch: session.trust_epoch }, decision: 'REFUSE' });
+    rules.push({ rule_id: 'RULE_TOKEN_EXPIRY', result: 'REFUSE', reason_code: 'TOKEN_EXPIRED_EPOCH', facts: { expiration_epoch: session.expiration_epoch, trust_epoch: session.trust_epoch } });
     codes.push('TOKEN_EXPIRED_EPOCH');
     outcome = 'REFUSE';
+  } else if (session.expiration_epoch && session.trust_epoch) {
+    rules.push({ rule_id: 'RULE_TOKEN_EXPIRY', result: 'ALLOW', reason_code: '', facts: { expiration_epoch: session.expiration_epoch, trust_epoch: session.trust_epoch } });
   }
 
+  // Hostile payload check
   if (isHostile(intent.requested_action)) {
-    rules.push({ rule_id: 'HOSTILE_PAYLOAD_BASIC', type: 'SECURITY_SCAN', input_facts: { requested_action: intent.requested_action, pattern_match: 'HOSTILE_DESTRUCTIVE' }, decision: 'REFUSE' });
+    rules.push({ rule_id: 'RULE_HOSTILE_PAYLOAD', result: 'REFUSE', reason_code: 'HOSTILE_DESTRUCTIVE_PATTERN', facts: { requested_action: intent.requested_action, pattern_match: 'HOSTILE_DESTRUCTIVE' } });
     codes.push('HOSTILE_DESTRUCTIVE_PATTERN');
     tier = 'CRITICAL';
     outcome = 'REFUSE';
   }
 
+  // Write-action scope check
   if (principal.authority_scope === 'Read_Only' && isWriteAction(intent.requested_action)) {
-    rules.push({ rule_id: 'SCOPE_MISMATCH', type: 'AUTHORIZATION', input_facts: { authority_scope: principal.authority_scope, requested_action: intent.requested_action, is_write_action: true }, decision: 'REFUSE' });
+    rules.push({ rule_id: 'RULE_WRITE_SCOPE_CHECK', result: 'REFUSE', reason_code: 'AUTH_SCOPE_MISMATCH_R401', facts: { authority_scope: principal.authority_scope, requested_action: intent.requested_action, is_write_action: true } });
     codes.push('AUTH_SCOPE_MISMATCH_R401');
     outcome = 'REFUSE';
   }
 
-  if (principal.delegation_chain_reference === 'ROOT_EXEC_AUTHORITY_V4') {
-    const levels = { LOW: 1, MEDIUM: 2, HIGH: 3, CRITICAL: 4 };
-    if ((levels[tier] || 1) < 2) tier = 'MEDIUM';
-    rules.push({ rule_id: 'RISK_OVERRIDE_BY_PRIVILEGE', type: 'PRIVILEGE_ESCALATION', input_facts: { delegation_chain_reference: principal.delegation_chain_reference, original_risk_tier: intent.declared_risk_tier, elevated_risk_tier: tier }, decision: 'ALLOW' });
-  }
-
+  // Financial transfer controls
   const isFin = intent.intent_type === 'FINANCIAL_TRANSFER' || intent.requested_action.toLowerCase().includes('wire') || intent.requested_action.toLowerCase().includes('transfer');
   if (isFin) {
     const amt = parseAmount(intent.parameters);
     if (amt === null && intent.intent_type === 'FINANCIAL_TRANSFER') {
-      rules.push({ rule_id: 'HIGH_VALUE_TRANSACTION_PROTOCOL', type: 'FINANCIAL_CONTROL', input_facts: { intent_type: intent.intent_type, amount_usd: null }, decision: 'REFUSE' });
+      rules.push({ rule_id: 'RULE_FINANCIAL_AMOUNT', result: 'REFUSE', reason_code: 'AMOUNT_REQUIRED', facts: { intent_type: intent.intent_type, amount_usd: null } });
       codes.push('AMOUNT_REQUIRED');
       outcome = 'REFUSE';
     } else if (amt !== null && amt >= 1000000) {
@@ -127,13 +231,13 @@ function runRules(principal, session, intent) {
       const hasSigs = sigs.length >= 3;
       const hasRoles = req.every(r => roles.includes(r));
       if (!hasSigs || !hasRoles) {
-        rules.push({ rule_id: 'MULTISIG_CONSENSUS_GATE', type: 'APPROVAL_GATE', input_facts: { amount_usd: amt, signatures_count: sigs.length, roles_present: roles, required_roles: req }, decision: 'REFUSE' });
+        rules.push({ rule_id: 'RULE_MULTISIG_CONSENSUS', result: 'REFUSE', reason_code: 'L4_CONSENSUS_PENDING', facts: { amount_usd: amt, signatures_count: sigs.length, roles_present: roles, required_roles: req } });
         codes.push('L4_CONSENSUS_PENDING');
         outcome = 'REFUSE';
       } else {
-        rules.push({ rule_id: 'MULTISIG_CONSENSUS_GATE', type: 'APPROVAL_GATE', input_facts: { amount_usd: amt, signatures_count: sigs.length, roles_present: roles }, decision: 'ALLOW' });
+        rules.push({ rule_id: 'RULE_MULTISIG_CONSENSUS', result: 'ALLOW', reason_code: '', facts: { amount_usd: amt, signatures_count: sigs.length, roles_present: roles } });
       }
-      rules.push({ rule_id: 'HIGH_VALUE_TRANSACTION_PROTOCOL', type: 'FINANCIAL_CONTROL', input_facts: { amount_usd: amt, threshold: 1000000, effective_risk_tier: tier }, decision: outcome === 'REFUSE' ? 'REFUSE' : 'ALLOW' });
+      rules.push({ rule_id: 'RULE_HIGH_VALUE_PROTOCOL', result: outcome === 'REFUSE' ? 'REFUSE' : 'ALLOW', reason_code: outcome === 'REFUSE' ? 'HIGH_VALUE_BLOCKED' : '', facts: { amount_usd: amt, threshold: 1000000, effective_risk_tier: tier } });
     }
   }
 
@@ -157,7 +261,8 @@ function buildBlueprint(principal, policyCtx, intentHash, gov) {
       principal_role: principal.organizational_role,
       authority_scope: principal.authority_scope,
       delegation_chain_reference: principal.delegation_chain_reference,
-      privilege_tier: getPrivilegeTier(principal.delegation_chain_reference)
+      privilege_tier: getPrivilegeTier(principal.delegation_chain_reference),
+      scope_profile: resolveScopeProfile(principal.authority_scope) ? principal.authority_scope : 'UNMAPPED'
     },
     decision: { outcome: gov.outcome, reason_codes: gov.codes },
     rule_trace: gov.rules
@@ -285,7 +390,87 @@ export default async function handler(req, res) {
     };
     const authorityTokenHash = await sha256Hex(canonicalStringify(authPayload));
 
+    // === PRE-MODEL ENFORCEMENT GATES ===
+    const privilegeTier = getPrivilegeTier(principal.delegation_chain_reference);
+    const scopeProfile = resolveScopeProfile(principal.authority_scope);
+    const enforcementTrace = [];
+    let enforcementRefused = false;
+    const enforcementCodes = [];
+
+    // Gate 0: Scope profile must be mapped
+    if (!scopeProfile) {
+      enforcementTrace.push({ rule_id: 'RULE_SCOPE_RESOLUTION', result: 'REFUSE', reason_code: 'AUTH_SCOPE_UNMAPPED', facts: { authority_scope: principal.authority_scope, known_scopes: Object.keys(SCOPE_PROFILES) } });
+      enforcementCodes.push('AUTH_SCOPE_UNMAPPED');
+      enforcementRefused = true;
+    } else {
+      enforcementTrace.push({ rule_id: 'RULE_SCOPE_RESOLUTION', result: 'ALLOW', reason_code: '', facts: { authority_scope: principal.authority_scope, scope_profile: principal.authority_scope } });
+
+      // Gate 1: Tenant scope enforcement (EXECUTE only)
+      if (normalizedIntent.intent_type === 'EXECUTE' && tenant_id) {
+        const tenantResult = evaluateTenantScope(scopeProfile, tenant_id, principal.authority_scope);
+        enforcementTrace.push(tenantResult);
+        if (tenantResult.result === 'REFUSE') {
+          enforcementCodes.push(tenantResult.reason_code);
+          enforcementRefused = true;
+        }
+      }
+
+      // Gate 2: System scope enforcement
+      const systemResult = evaluateSystemScope(scopeProfile, normalizedIntent.target_system, principal.authority_scope);
+      enforcementTrace.push(systemResult);
+      if (systemResult.result === 'REFUSE') {
+        enforcementCodes.push(systemResult.reason_code);
+        enforcementRefused = true;
+      }
+
+      // Gate 3: Risk ceiling enforcement
+      const riskResult = evaluateRiskCeiling(scopeProfile, normalizedIntent.declared_risk_tier, privilegeTier, principal.authority_scope);
+      enforcementTrace.push(riskResult);
+      if (riskResult.result === 'REFUSE') {
+        enforcementCodes.push(riskResult.reason_code);
+        enforcementRefused = true;
+      }
+    }
+
+    // If any enforcement gate refused, return structured REFUSE — do NOT call model
+    if (enforcementRefused) {
+      const sessionId = session.session_id || await genSessionId(session.token_id, principal.delegation_chain_reference);
+      const refusalCore = {
+        status: 'REFUSE',
+        session_id: sessionId,
+        intent_hash: intentHash,
+        authority_token_hash: authorityTokenHash,
+        blueprint_hash: null,
+        parent_receipt_hash: authoritativeParentHash,
+        risk_tier: normalizedIntent.declared_risk_tier || 'LOW',
+        reason_codes: enforcementCodes,
+        rule_trace: enforcementTrace,
+        blueprint: null,
+        issuer_key_id: issuerKeyId
+      };
+      const rh = await sha256Hex(canonicalStringify(refusalCore));
+      const refusalReceipt = {
+        ...refusalCore,
+        receipt_hash: rh,
+        receipt_signature: await hmacSha256Hex(signingSecret, rh),
+        next_parent_receipt_hash: rh
+      };
+      await JournalAdapter.writeReceipt(refusalReceipt);
+      return res.status(403).json(refusalReceipt);
+    }
+
+    // === GOVERNANCE RULES (post-enforcement) ===
     const gov = runRules(principal, session, normalizedIntent);
+    // Merge enforcement trace into governance rules
+    gov.rules = [...enforcementTrace, ...gov.rules];
+
+    // TRACE_MISSING guardrail: if ALLOW and rule_trace empty, hard fail
+    if (gov.outcome === 'ALLOW' && gov.rules.length === 0) {
+      gov.outcome = 'REFUSE';
+      gov.codes.push('TRACE_MISSING');
+      gov.rules.push({ rule_id: 'RULE_TRACE_GUARDRAIL', result: 'REFUSE', reason_code: 'TRACE_MISSING', facts: { message: 'ALLOW without rule trace is forbidden' } });
+    }
+
     const blueprint = buildBlueprint(principal, policy_context, intentHash, gov);
     const blueprintHash = await sha256Hex(canonicalStringify(blueprint));
 
@@ -364,8 +549,24 @@ export default async function handler(req, res) {
     res.status(blueprint.decision.outcome === 'ALLOW' ? 200 : 403).json(receipt);
 
   } catch (err) {
+    const errMsg = err?.message || 'Unknown runtime failure';
+
+    // Normalize DAG_HEAD_MISMATCH to structured refusal
+    if (errMsg.includes('DAG_HEAD_MISMATCH')) {
+      const match = errMsg.match(/Expected parent ([a-f0-9]+), got ([a-f0-9]+)/);
+      const dagRefusal = {
+        status: 'REFUSE',
+        reason_codes: ['DAG_HEAD_MISMATCH'],
+        expected_parent: match ? match[1] : null,
+        provided_parent: match ? match[2] : null,
+        message: 'Concurrent write detected. Retry with current head.',
+        rule_trace: [{ rule_id: 'RULE_DAG_SERIALIZATION', result: 'REFUSE', reason_code: 'DAG_HEAD_MISMATCH', facts: { expected_parent: match ? match[1] : null, provided_parent: match ? match[2] : null } }]
+      };
+      return res.status(409).json(dagRefusal);
+    }
+
     try {
-      const errorReceipt = UnifiedSerializer.serializeError('KERNEL_RUNTIME_EXCEPTION', err?.message || 'Unknown runtime failure');
+      const errorReceipt = UnifiedSerializer.serializeError('KERNEL_RUNTIME_EXCEPTION', errMsg);
       res.status(500).json(errorReceipt);
     } catch (_) {
       res.status(500).json(UnifiedSerializer.serializeError('SERIALIZATION_VIOLATION', 'Fatal serialization failure'));
