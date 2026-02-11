@@ -75,6 +75,7 @@ function evaluateSystemScope(scopeProfile, targetSystem, authorityScope) {
 function evaluateRiskCeiling(scopeProfile, declaredRisk, privilegeTier, authorityScope) {
   const maxLevel = RISK_LEVELS[scopeProfile.max_risk] || 1;
   const declaredLevel = RISK_LEVELS[declaredRisk] || 1;
+  const privilegeRank = parseInt(privilegeTier.replace('TIER_', ''), 10);
 
   const entry = {
     rule_id: 'RULE_RISK_CEILING_ENFORCEMENT',
@@ -84,17 +85,19 @@ function evaluateRiskCeiling(scopeProfile, declaredRisk, privilegeTier, authorit
       declared_risk_tier: declaredRisk,
       max_risk: scopeProfile.max_risk,
       authority_scope: authorityScope,
-      privilege_tier: privilegeTier
+      privilege_tier: privilegeTier,
+      privilege_rank: privilegeRank
     }
   };
 
   if (declaredLevel <= maxLevel) return entry;
 
   // Risk exceeds ceiling — check for privilege override
+  // Tier ordering: TIER_1 = lowest, TIER_4 = highest
+  // Override requires privilege_tier >= required_override_tier
   if (scopeProfile.override_eligible) {
-    const tierNum = parseInt(privilegeTier.replace('TIER_', ''), 10);
-    const requiredNum = parseInt((scopeProfile.required_override_tier || 'TIER_0').replace('TIER_', ''), 10);
-    if (tierNum <= requiredNum) {
+    const requiredRank = parseInt((scopeProfile.required_override_tier || 'TIER_1').replace('TIER_', ''), 10);
+    if (privilegeRank >= requiredRank) {
       // Privilege override granted — record it explicitly
       return {
         rule_id: 'RULE_RISK_OVERRIDE_BY_PRIVILEGE',
@@ -104,11 +107,29 @@ function evaluateRiskCeiling(scopeProfile, declaredRisk, privilegeTier, authorit
           declared_risk_tier: declaredRisk,
           max_risk: scopeProfile.max_risk,
           privilege_tier: privilegeTier,
+          privilege_rank: privilegeRank,
           required_override_tier: scopeProfile.required_override_tier,
+          required_rank: requiredRank,
           override_granted: true
         }
       };
     }
+    // Privilege insufficient for override
+    return {
+      rule_id: 'RULE_RISK_CEILING_ENFORCEMENT',
+      result: 'REFUSE',
+      reason_code: 'PRIVILEGE_INSUFFICIENT_FOR_OVERRIDE',
+      facts: {
+        declared_risk_tier: declaredRisk,
+        max_risk: scopeProfile.max_risk,
+        privilege_tier: privilegeTier,
+        privilege_rank: privilegeRank,
+        required_override_tier: scopeProfile.required_override_tier,
+        required_rank: requiredRank,
+        override_eligible: true,
+        override_granted: false
+      }
+    };
   }
 
   // No override possible
@@ -154,9 +175,10 @@ function validatePolicyContext(p) {
   return e;
 }
 
+// Tier ordering: TIER_1 = lowest, TIER_4 = highest
 function getPrivilegeTier(ref) {
-  if (ref === 'ROOT_EXEC_AUTHORITY_V4') return 'TIER_0';
-  if (ref === 'FINANCE_ANALYST_V1') return 'TIER_4';
+  if (ref === 'ROOT_EXEC_AUTHORITY_V4') return 'TIER_4';
+  if (ref === 'FINANCE_ANALYST_V1') return 'TIER_2';
   return 'TIER_3';
 }
 
