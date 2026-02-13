@@ -285,7 +285,7 @@ const KernelV4 = () => {
         principal: {
           legal_name: "James Benton",
           organizational_role: "Director",
-          authority_scope: "Kernel Governance Administration",
+          authority_scope: "QueueFlow_Ops",
           delegation_chain_reference: "ROOT_EXEC_AUTHORITY_V4"
         },
         session: {
