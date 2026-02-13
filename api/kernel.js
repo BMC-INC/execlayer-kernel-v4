@@ -34,6 +34,12 @@ const SCOPE_PROFILES = {
     allowed_systems: [],
     max_risk: 'LOW',
     override_eligible: false
+  },
+  Public_Kernel: {
+    allowed_tenants: ['*'],
+    allowed_systems: ['KERNEL'],
+    max_risk: 'LOW',
+    override_eligible: false
   }
 };
 
